@@ -1,6 +1,6 @@
 # toolbox
 
-Single-file CLI tools. Each lives in its own directory; `bin/` has symlinks for PATH.
+Simple CLI tools. Each lives in its own directory; `bin/` has symlinks for PATH.
 
 ## Setup
 
@@ -14,9 +14,11 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | Tool | Description |
 |------|-------------|
 | [bcat](bcat/) | Pipe stdin to a browser, infers filetype |
+| [blinks](blinks/) | Find broken symlinks |
 | [check-math](check-math/) | Verify math rendering in HTML/Markdown |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
 | [ips](ips/) | Show local and public IP addresses |
+| [reflow](reflow/) | Reflow Markdown text preserving code blocks |
 | [toks](toks/) | Count tokens (tiktoken) |
 | [webshot](webshot/) | Screenshot URLs and extract page metadata |
 

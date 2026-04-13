@@ -1,6 +1,6 @@
 repository:
   name: toolbox
-  description: Single-file CLI tools
+  description: Simple CLI tools
   default_branch: main
   has_wiki: false
   has_projects: false
