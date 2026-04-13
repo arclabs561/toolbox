@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Find broken symlinks.
+#   blinks        search 2 levels deep
+#   blinks 5      search 5 levels deep
+#   blinks -a     search all (no depth limit)
+
+set -e
+
+depth_args=(-maxdepth "${1:-2}")
+if [ "${1:-}" = "-a" ]; then
+  depth_args=()
+fi
+
+found=0
+while IFS= read -r -d '' fn; do
+  if ! [ -e "$fn" ]; then
+    target=$(readlink "$fn" 2>/dev/null || echo "?")
+    if [ "$(uname -s)" = Darwin ]; then
+      mtime=$(stat -f '%Sm' -t '%Y-%m-%d' "$fn" 2>/dev/null || echo "?")
+    else
+      mtime=$(stat -c '%y' "$fn" 2>/dev/null | cut -d' ' -f1 || echo "?")
+    fi
+    printf "%-50s -> %-30s  %s\n" "$fn" "$target" "$mtime"
+    found=$((found + 1))
+  fi
+done < <(find . "${depth_args[@]}" -xtype l -print0 2>/dev/null)
+
+if [ "$found" -eq 0 ]; then
+  echo "no broken symlinks found"
+fi
