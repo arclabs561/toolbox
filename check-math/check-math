@@ -14,16 +14,15 @@ headless browser.
 Prereq: go install github.com/chrishrb/go-grip@latest
 
 Usage:
-  uv run check-math.py causal-experimentation/meta-learners.md
-  uv run check-math.py causal-experimentation/meta-learners.md -s out.png
-  uv run check-math.py **/*.md
+  check-math document.md
+  check-math document.md -s out.png
+  check-math **/*.md
 """
 from __future__ import annotations
 
 import argparse
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -216,22 +215,21 @@ def check(file_path: str, screenshot: str | None = None, port: int = 16419) -> l
     try:
         # wait for server to be ready
         for _ in range(30):
-            try:
-                subprocess.run(
-                    ["curl", "-sf", "-o", "/dev/null", url],
-                    capture_output=True, timeout=2,
-                )
+            result = subprocess.run(
+                ["curl", "-sf", "-o", "/dev/null", url],
+                capture_output=True, timeout=2,
+            )
+            if result.returncode == 0:
                 break
-            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                time.sleep(0.3)
+            time.sleep(0.3)
         else:
             print(f"go-grip failed to start on port {port}", file=sys.stderr)
             return ["go-grip server did not start"]
 
         print(f"Checking: {file_path} (via go-grip on :{port})")
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
             page = browser.new_page(viewport={"width": 1280, "height": 900})
             page.goto(url, wait_until="networkidle")
 
@@ -254,8 +252,12 @@ def check(file_path: str, screenshot: str | None = None, port: int = 16419) -> l
 
             browser.close()
     finally:
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=5)
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
     return issues
 
