@@ -77,52 +77,50 @@ def cmd_shot(args: argparse.Namespace) -> None:
     height = 844 if args.mobile else args.height
     scale = args.scale
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        ctx_opts: dict = {
-            "viewport": {"width": width, "height": height},
-            "device_scale_factor": scale,
-        }
-        if args.mobile:
-            ctx_opts["user_agent"] = (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-                "Mobile/15E148 Safari/604.1"
-            )
-            ctx_opts["is_mobile"] = True
-            ctx_opts["has_touch"] = True
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            ctx_opts: dict = {
+                "viewport": {"width": width, "height": height},
+                "device_scale_factor": scale,
+            }
+            if args.mobile:
+                ctx_opts["user_agent"] = (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+                    "Mobile/15E148 Safari/604.1"
+                )
+                ctx_opts["is_mobile"] = True
+                ctx_opts["has_touch"] = True
 
-        page = browser.new_page(**ctx_opts)
+            page = browser.new_page(**ctx_opts)
 
-        if args.dark:
-            page.emulate_media(color_scheme="dark")
+            if args.dark:
+                page.emulate_media(color_scheme="dark")
 
-        page.goto(url, wait_until="networkidle", timeout=args.timeout * 1000)
+            page.goto(url, wait_until="networkidle", timeout=args.timeout * 1000)
 
-        if args.wait:
-            page.wait_for_timeout(int(args.wait * 1000))
+            if args.wait:
+                page.wait_for_timeout(int(args.wait * 1000))
 
-        shot_opts: dict = {"path": out, "type": fmt}
-        if fmt == "jpeg":
-            shot_opts["quality"] = args.quality
+            shot_opts: dict = {"path": out, "type": fmt}
+            if fmt == "jpeg":
+                shot_opts["quality"] = args.quality
 
-        if args.selector:
-            el = page.query_selector(args.selector)
-            if not el:
-                print(f"error: selector not found: {args.selector}", file=sys.stderr)
-                browser.close()
-                if tmp:
-                    tmp.unlink()
-                sys.exit(1)
-            el.screenshot(**shot_opts)
-        else:
-            shot_opts["full_page"] = args.full_page
-            page.screenshot(**shot_opts)
+            if args.selector:
+                el = page.query_selector(args.selector)
+                if not el:
+                    print(f"error: selector not found: {args.selector}", file=sys.stderr)
+                    sys.exit(1)
+                el.screenshot(**shot_opts)
+            else:
+                shot_opts["full_page"] = args.full_page
+                page.screenshot(**shot_opts)
 
-        browser.close()
-
-    if tmp:
-        tmp.unlink()
+            browser.close()
+    finally:
+        if tmp:
+            tmp.unlink()
 
     size = Path(out).stat().st_size
     label = f"{width}x{height}@{scale}x"
