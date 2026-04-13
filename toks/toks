@@ -1,0 +1,38 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["tiktoken"]
+# ///
+
+"""Count tokens for a given text using tiktoken."""
+
+import argparse
+import sys
+
+import tiktoken
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Count tokens using tiktoken.")
+    parser.add_argument(
+        "file",
+        nargs="?",
+        type=argparse.FileType("r"),
+        default=sys.stdin,
+        help="Input file (default: stdin).",
+    )
+    parser.add_argument(
+        "-e",
+        "--encoding",
+        default="cl100k_base",
+        help="Tiktoken encoding (default: cl100k_base). Common: cl100k_base (GPT-4/Claude), o200k_base (GPT-4o).",
+    )
+    args = parser.parse_args()
+
+    text = args.file.read()
+    enc = tiktoken.get_encoding(args.encoding)
+    print(len(enc.encode(text)))
+
+
+if __name__ == "__main__":
+    main()
