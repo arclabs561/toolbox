@@ -1,0 +1,7 @@
+repository:
+  name: toolbox
+  description: Single-file CLI tools
+  default_branch: main
+  has_wiki: false
+  has_projects: false
+  topics: cli, tools, python, uv
