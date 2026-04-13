@@ -1,0 +1,28 @@
+#!/bin/bash
+
+# Pipe stdin to a browser. Infers filetype from content or -t flag.
+#   echo '<h1>hi</h1>' | bcat
+#   cat data.json | bcat -t json
+#   cat README.md | bcat -t md
+#   bcat < style.css
+
+set -e
+
+ext="html"
+while getopts "t:" opt; do
+  case $opt in
+    t) ext="$OPTARG" ;;
+    *) echo "usage: bcat [-t ext] < file" >&2; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+dir=$(mktemp -d)
+path="$dir/file.$ext"
+cat - > "$path"
+
+if [ "$(uname -s)" = Darwin ]; then
+  open "$path"
+else
+  xdg-open "$path" 2>/dev/null || echo "$path"
+fi

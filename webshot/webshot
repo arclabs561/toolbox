@@ -1,0 +1,303 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["playwright"]
+# ///
+
+"""Render HTML/URLs to screenshots and extract metadata. Built for VLM/LLM pipelines.
+
+Subcommands:
+  shot   - Screenshot a URL or local HTML file (headless Chromium)
+  meta   - Extract page metadata (title, description, OG tags, JSON-LD)
+
+Examples:
+  webshot shot https://example.com
+  webshot shot page.html -o page.png
+  webshot shot https://example.com --full-page --width 1280
+  webshot shot https://example.com --selector "article" -o article.png
+  webshot shot https://example.com --mobile
+  webshot shot https://example.com --jpg --quality 80
+  webshot meta https://example.com
+  webshot meta https://github.com/org/repo --json
+  webshot meta page.html --all --json
+  cat page.html | webshot shot - -o out.png
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import urlparse
+
+from playwright.sync_api import sync_playwright
+
+
+def resolve_target(target: str) -> tuple[str, Path | None]:
+    """Return (url, tmp_file_or_none). Handles URLs, local files, and stdin (-)."""
+    if target == "-":
+        html = sys.stdin.read()
+        tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w")
+        tmp.write(html)
+        tmp.close()
+        return f"file://{tmp.name}", Path(tmp.name)
+    if target.startswith(("http://", "https://", "file://")):
+        return target, None
+    p = Path(target).resolve()
+    if not p.exists():
+        print(f"error: file not found: {target}", file=sys.stderr)
+        sys.exit(1)
+    return f"file://{p}", None
+
+
+def default_output(target: str, ext: str) -> str:
+    if target == "-":
+        return f"stdin.{ext}"
+    if target.startswith(("http://", "https://")):
+        parsed = urlparse(target)
+        host = parsed.hostname or "page"
+        # include path slug for differentiation
+        path_slug = re.sub(r"[^a-zA-Z0-9]+", "-", parsed.path.strip("/"))
+        if path_slug:
+            return f"{host}_{path_slug}.{ext}"
+        return f"{host}.{ext}"
+    return Path(target).stem + f".{ext}"
+
+
+def cmd_shot(args: argparse.Namespace) -> None:
+    url, tmp = resolve_target(args.target)
+
+    fmt = "jpeg" if args.jpg else "png"
+    out = args.output or default_output(args.target, "jpg" if args.jpg else "png")
+
+    width = 390 if args.mobile else args.width
+    height = 844 if args.mobile else args.height
+    scale = args.scale
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        ctx_opts: dict = {
+            "viewport": {"width": width, "height": height},
+            "device_scale_factor": scale,
+        }
+        if args.mobile:
+            ctx_opts["user_agent"] = (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+                "Mobile/15E148 Safari/604.1"
+            )
+            ctx_opts["is_mobile"] = True
+            ctx_opts["has_touch"] = True
+
+        page = browser.new_page(**ctx_opts)
+
+        if args.dark:
+            page.emulate_media(color_scheme="dark")
+
+        page.goto(url, wait_until="networkidle", timeout=args.timeout * 1000)
+
+        if args.wait:
+            page.wait_for_timeout(int(args.wait * 1000))
+
+        shot_opts: dict = {"path": out, "type": fmt}
+        if fmt == "jpeg":
+            shot_opts["quality"] = args.quality
+
+        if args.selector:
+            el = page.query_selector(args.selector)
+            if not el:
+                print(f"error: selector not found: {args.selector}", file=sys.stderr)
+                browser.close()
+                if tmp:
+                    tmp.unlink()
+                sys.exit(1)
+            el.screenshot(**shot_opts)
+        else:
+            shot_opts["full_page"] = args.full_page
+            page.screenshot(**shot_opts)
+
+        browser.close()
+
+    if tmp:
+        tmp.unlink()
+
+    size = Path(out).stat().st_size
+    label = f"{width}x{height}@{scale}x"
+    if args.mobile:
+        label += " mobile"
+    print(f"{out} ({size:,} bytes, {label})")
+
+
+# Meta tags that are tracking/internal noise -- filtered by default
+_META_NOISE_PATTERNS = re.compile(
+    r"^(octolytics|analytics|visitor|fetch-nonce|html-safe-nonce|request-id|"
+    r"browser-stats|browser-errors|turbo|pjax|x-pjax|hydrostats|route-|"
+    r"current-catalog|selected-link|hovercard|expected-hostname|hostname|"
+    r"release|ui-target|disable-turbo|go-import|github-keyboard|"
+    r"google-site-verification|user-login|apple-itunes-app|"
+    r"fb:app_id)",
+    re.IGNORECASE,
+)
+
+
+_META_NOISE_HTTP_EQUIV = {"x-pjax-version", "x-pjax-csp-version", "x-pjax-css-version", "x-pjax-js-version"}
+
+
+def _is_noise_tag(tag: dict) -> bool:
+    name = tag.get("name", "") or tag.get("property", "") or ""
+    http_equiv = tag.get("http-equiv", "")
+    if http_equiv and http_equiv.lower() in _META_NOISE_HTTP_EQUIV:
+        return True
+    if not name and not http_equiv:
+        # tags with only data-* attrs or charset are noise in LLM context
+        keys = set(tag.keys())
+        return keys <= {"charset"} or all(k.startswith("data-") for k in keys)
+    return bool(_META_NOISE_PATTERNS.match(name))
+
+
+def cmd_meta(args: argparse.Namespace) -> None:
+    url, tmp = resolve_target(args.target)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page()
+        page.goto(url, wait_until="networkidle", timeout=args.timeout * 1000)
+
+        meta = page.evaluate(
+            """() => {
+            const get = (sel) => {
+                const el = document.querySelector(sel);
+                return el ? el.getAttribute('content') || el.textContent || null : null;
+            };
+            const getAll = (sel) =>
+                [...document.querySelectorAll(sel)].map(el =>
+                    Object.fromEntries([...el.attributes].map(a => [a.name, a.value]))
+                );
+
+            // structured data (JSON-LD)
+            const jsonld = [...document.querySelectorAll('script[type="application/ld+json"]')]
+                .map(el => { try { return JSON.parse(el.textContent); } catch { return null; } })
+                .filter(Boolean);
+
+            // heading structure (useful for LLM context)
+            const headings = [...document.querySelectorAll('h1, h2, h3')]
+                .slice(0, 20)
+                .map(el => ({ level: parseInt(el.tagName[1]), text: el.textContent.trim() }))
+                .filter(h => h.text);
+
+            return {
+                url: location.href,
+                title: document.title || null,
+                description: get('meta[name="description"]'),
+                og: {
+                    title: get('meta[property="og:title"]'),
+                    description: get('meta[property="og:description"]'),
+                    image: get('meta[property="og:image"]'),
+                    type: get('meta[property="og:type"]'),
+                    url: get('meta[property="og:url"]'),
+                    site_name: get('meta[property="og:site_name"]'),
+                },
+                twitter: {
+                    card: get('meta[name="twitter:card"]'),
+                    title: get('meta[name="twitter:title"]'),
+                    description: get('meta[name="twitter:description"]'),
+                    image: get('meta[name="twitter:image"]'),
+                },
+                canonical: get('link[rel="canonical"]'),
+                lang: document.documentElement.lang || null,
+                headings: headings,
+                jsonld: jsonld,
+                meta_tags: getAll('meta'),
+            };
+        }"""
+        )
+        browser.close()
+
+    if tmp:
+        tmp.unlink()
+
+    # filter noisy meta tags unless --all
+    if not args.all:
+        meta["meta_tags"] = [t for t in meta.get("meta_tags", []) if not _is_noise_tag(t)]
+        # og:/twitter: already captured in structured dicts -- remove from raw list
+        meta["meta_tags"] = [
+            t for t in meta["meta_tags"]
+            if not (t.get("property", "").startswith("og:") or t.get("name", "").startswith("twitter:"))
+        ]
+
+    # strip null/empty values
+    def prune(obj):
+        if isinstance(obj, dict):
+            return {k: prune(v) for k, v in obj.items() if v is not None and v != {} and v != []}
+        if isinstance(obj, list):
+            return [prune(v) for v in obj if v is not None]
+        return obj
+
+    meta = prune(meta)
+
+    if args.json:
+        print(json.dumps(meta, indent=2, ensure_ascii=False))
+    else:
+        for key, val in meta.items():
+            if isinstance(val, (dict, list)):
+                print(f"{key}:")
+                if isinstance(val, dict):
+                    for k, v in val.items():
+                        print(f"  {k}: {v}")
+                elif key == "headings":
+                    for h in val:
+                        indent = "  " * h.get("level", 1)
+                        print(f"  {indent}h{h['level']}: {h['text']}")
+                else:
+                    for item in val:
+                        if isinstance(item, dict):
+                            parts = [f"{k}={v}" for k, v in item.items()]
+                            print(f"  - {' '.join(parts)}")
+                        else:
+                            print(f"  - {item}")
+            else:
+                print(f"{key}: {val}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="webshot",
+        description="HTML/URL to screenshot + metadata extraction for VLM/LLM.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    # -- shot --
+    p_shot = sub.add_parser("shot", help="Screenshot a URL or HTML file")
+    p_shot.add_argument("target", help="URL, local HTML file, or - for stdin")
+    p_shot.add_argument("-o", "--output", help="Output path (default: auto from target)")
+    p_shot.add_argument("--width", type=int, default=1280, help="Viewport width (default: 1280)")
+    p_shot.add_argument("--height", type=int, default=720, help="Viewport height (default: 720)")
+    p_shot.add_argument("--scale", type=int, default=2, help="Device scale factor (default: 2)")
+    p_shot.add_argument("--full-page", action="store_true", help="Capture full scrollable page")
+    p_shot.add_argument("--dark", action="store_true", help="Emulate dark color scheme")
+    p_shot.add_argument("--mobile", action="store_true", help="iPhone viewport + UA")
+    p_shot.add_argument("--selector", "-s", help="CSS selector to screenshot (element only)")
+    p_shot.add_argument("--jpg", action="store_true", help="Output JPEG instead of PNG")
+    p_shot.add_argument("--quality", type=int, default=85, help="JPEG quality 0-100 (default: 85)")
+    p_shot.add_argument("--wait", type=float, default=0, help="Extra wait in seconds after load")
+    p_shot.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
+
+    # -- meta --
+    p_meta = sub.add_parser("meta", help="Extract page metadata")
+    p_meta.add_argument("target", help="URL, local HTML file, or - for stdin")
+    p_meta.add_argument("--json", action="store_true", help="Output as JSON")
+    p_meta.add_argument("--all", action="store_true", help="Include all meta tags (no noise filter)")
+    p_meta.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
+
+    args = parser.parse_args()
+    if args.cmd == "shot":
+        cmd_shot(args)
+    elif args.cmd == "meta":
+        cmd_meta(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,295 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "playwright",
+# ]
+# ///
+"""Verify LaTeX math rendering in markdown files.
+
+Uses go-grip (exact GitHub rendering with MathJax) served locally,
+then checks for unrendered delimiters and MathJax parse errors via
+headless browser.
+
+Prereq: go install github.com/chrishrb/go-grip@latest
+
+Usage:
+  uv run check-math.py causal-experimentation/meta-learners.md
+  uv run check-math.py causal-experimentation/meta-learners.md -s out.png
+  uv run check-math.py **/*.md
+"""
+from __future__ import annotations
+
+import argparse
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+def _find_go_grip() -> str:
+    """Find go-grip binary on PATH."""
+    path = shutil.which("go-grip")
+    if path:
+        return path
+    print("go-grip not found. Install: go install github.com/chrishrb/go-grip@latest", file=sys.stderr)
+    sys.exit(1)
+
+
+# --- GitHub MathJax divergence checks ---
+#
+# go-grip uses full MathJax 3 without restrictions. GitHub's renderer
+# blocks certain macros, preprocesses markdown (underscores, brackets)
+# before MathJax sees it, and requires specific formatting for display
+# math. These checks catch divergences that go-grip rendering misses.
+#
+# Sources:
+#   github/markup#1688 (operatorname), github/markup#1575 (escaping),
+#   community/discussions/58722 (underscores), community/discussions/41087
+#   (environments), nschloe.github.io/2022/05/20/math-on-github.html
+
+# Macros GitHub's MathJax blocks entirely.
+GITHUB_BLOCKED_MACROS = {
+    r"\operatorname",
+    r"\DeclareMathOperator",
+    r"\newcommand",
+    r"\renewcommand",
+    r"\def",
+    r"\let",
+    r"\providecommand",
+}
+
+
+def _extract_math_spans(text: str, inline_only: bool = False) -> list[tuple[str, int]]:
+    """Extract math content from $...$ and $$...$$ delimiters.
+
+    Returns list of (content, line_number) tuples.
+    If inline_only, skip display math ($$...$$) which is better protected.
+    """
+    spans = []
+    if not inline_only:
+        # display math $$...$$
+        for m in re.finditer(r'\$\$(.+?)\$\$', text, re.DOTALL):
+            line = text[:m.start()].count('\n') + 1
+            spans.append((m.group(1), line))
+    # inline math $...$  (not preceded/followed by $)
+    for m in re.finditer(r'(?<!\$)\$(?!\$)([^$\n]{2,200})\$(?!\$)', text):
+        line = text[:m.start()].count('\n') + 1
+        spans.append((m.group(1), line))
+    return spans
+
+
+def _check_source_github_compat(file_path: str) -> list[str]:
+    """Source-level checks for GitHub MathJax divergences."""
+    text = Path(file_path).read_text()
+    issues = []
+
+    # 1. Blocked macros
+    for macro in GITHUB_BLOCKED_MACROS:
+        pattern = re.escape(macro) + r"(?=[{\s*]|$)"
+        matches = re.findall(pattern, text)
+        if matches:
+            issues.append(
+                f"GitHub-blocked macro: {macro} ({len(matches)}x). "
+                f"Use \\text{{}} instead of \\operatorname{{}}."
+            )
+
+    math_spans = _extract_math_spans(text)
+
+    # 2. Underscore conflict: bare _ in inline math ($...$) can be eaten
+    #    by Markdown italic preprocessing. Display math ($$...$$) is safe.
+    #    Only flag when underscores form a valid emphasis pair: _text_.
+    inline_spans = _extract_math_spans(text, inline_only=True)
+    for content, line in inline_spans:
+        # match unescaped underscores only (\_  is safe in Markdown)
+        emphasis = re.findall(r'(?<!\\)_([^\s_]{1,30})(?<!\\)_', content)
+        if emphasis:
+            issues.append(
+                f"L{line}: underscore pattern may form Markdown emphasis "
+                f"(_{'_, _'.join(emphasis[:3])}_): ...{content[:50]}... "
+                f"Wrap subscripts in braces: x_{{i}} not x_i"
+            )
+
+    # 3. Display math $$ without blank line before/after
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('$$') and not stripped == '$$':
+            # single-line display math like $$x + y$$ -- ok
+            continue
+        if stripped == '$$':
+            # opening $$ needs blank line before, closing $$ needs blank after
+            if i > 0 and lines[i - 1].strip():
+                # check if this is closing (search back for opening)
+                prev_dd = any(lines[j].strip() == '$$' for j in range(max(0, i - 20), i))
+                if not prev_dd:
+                    issues.append(
+                        f"L{i+1}: display math $$ without blank line before "
+                        f"(GitHub requires blank lines around $$)"
+                    )
+
+    # 4. align environment (use aligned instead)
+    for content, line in math_spans:
+        if re.search(r'\\begin\{align\*?\}', content):
+            issues.append(
+                f"L{line}: \\begin{{align}} may fail on GitHub. "
+                f"Use \\begin{{aligned}} inside $$ instead."
+            )
+
+    # 5. Percent sign in math (breaks rendering)
+    for content, line in math_spans:
+        if '%' in content and '\\%' not in content:
+            issues.append(
+                f"L{line}: bare % in math mode breaks GitHub rendering. "
+                f"Use \\% for literal percent."
+            )
+
+    return issues
+
+
+def _check_unrendered_math(page) -> list[str]:
+    """Look for raw math delimiters that MathJax failed to process."""
+    # get visible text excluding MathJax-rendered content (which exposes LaTeX in accessibility text)
+    visible_text = page.evaluate("""
+        (() => {
+            const clone = document.body.cloneNode(true);
+            clone.querySelectorAll('mjx-container, .MathJax, .MathJax_Display, script[type*="math"]')
+                .forEach(el => el.remove());
+            return clone.innerText;
+        })()
+    """)
+    issues = []
+
+    # unrendered display math
+    raw_display = re.findall(r'^\$\$', visible_text, re.MULTILINE)
+    if raw_display:
+        issues.append(f"{len(raw_display)} unrendered display math delimiter(s) ($$)")
+
+    # unrendered inline math with LaTeX content
+    # MathJax accessibility text can expose \tau, \mathbb etc. in innerText even
+    # when rendered. Only flag expressions that look like full unrendered LaTeX
+    # (contain both a command AND structural syntax like braces or subscript).
+    raw_inline = re.findall(r'(?<!\$)\$(?!\$)([^$\n]{2,80})\$(?!\$)', visible_text)
+    math_patterns = [m for m in raw_inline if re.search(r'\\[a-zA-Z]', m) and re.search(r'[{}_^]', m)]
+    if math_patterns:
+        issues.append(
+            f"{len(math_patterns)} likely unrendered inline math expression(s): "
+            + ", ".join(f"${m[:40]}$" for m in math_patterns[:3])
+        )
+
+    # MathJax error elements
+    error_count = page.evaluate(
+        "document.querySelectorAll('.MathJax_Error, mjx-merror, [data-mjx-error]').length"
+    )
+    if error_count:
+        error_texts = page.evaluate("""
+            [...document.querySelectorAll('.MathJax_Error, mjx-merror, [data-mjx-error]')]
+                .slice(0, 5)
+                .map(e => (e.textContent || e.getAttribute('data-mjx-error') || '').slice(0, 80))
+        """)
+        issues.append(f"{error_count} MathJax error(s): {'; '.join(error_texts)}")
+
+    return issues
+
+
+def check(file_path: str, screenshot: str | None = None, port: int = 16419) -> list[str]:
+    """Start go-grip, verify math rendering, stop server."""
+    from playwright.sync_api import sync_playwright
+
+    # Static source-level checks before launching browser
+    source_issues = _check_source_github_compat(file_path)
+
+    grip = _find_go_grip()
+    p = Path(file_path).resolve()
+
+    # go-grip serves relative to the file's parent dir
+    # URL is http://localhost:PORT/<filename>
+    proc = subprocess.Popen(
+        [grip, str(p), "-b=false", f"-p={port}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    url = f"http://localhost:{port}/{p.name}"
+    try:
+        # wait for server to be ready
+        for _ in range(30):
+            try:
+                subprocess.run(
+                    ["curl", "-sf", "-o", "/dev/null", url],
+                    capture_output=True, timeout=2,
+                )
+                break
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                time.sleep(0.3)
+        else:
+            print(f"go-grip failed to start on port {port}", file=sys.stderr)
+            return ["go-grip server did not start"]
+
+        print(f"Checking: {file_path} (via go-grip on :{port})")
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.goto(url, wait_until="networkidle")
+
+            # wait for MathJax to finish rendering
+            try:
+                page.wait_for_function(
+                    "() => typeof MathJax !== 'undefined' && MathJax.startup && MathJax.startup.promise",
+                    timeout=10000,
+                )
+                page.evaluate("MathJax.startup.promise")
+            except Exception:
+                pass
+
+            page.wait_for_timeout(2000)
+            issues = source_issues + _check_unrendered_math(page)
+
+            if screenshot:
+                page.screenshot(path=screenshot, full_page=True)
+                print(f"Screenshot: {screenshot}")
+
+            browser.close()
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+
+    return issues
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="check-math",
+        description="Verify LaTeX math rendering in markdown files (uses go-grip)",
+    )
+    parser.add_argument("files", nargs="+", help="Markdown file(s) to check")
+    parser.add_argument("--screenshot", "-s", help="Save screenshot (single file only)")
+    args = parser.parse_args()
+
+    all_ok = True
+    for i, file_path in enumerate(args.files):
+        if not Path(file_path).exists():
+            print(f"File not found: {file_path}", file=sys.stderr)
+            all_ok = False
+            continue
+
+        ss = args.screenshot if len(args.files) == 1 else None
+        port = 16419 + i  # unique port per file to avoid collisions
+        issues = check(file_path, ss, port=port)
+
+        if issues:
+            print(f"  FAILED ({len(issues)} issue(s)):")
+            for j, issue in enumerate(issues, 1):
+                print(f"    {j}. {issue}")
+            all_ok = False
+        else:
+            print(f"  PASSED")
+
+    sys.exit(0 if all_ok else 1)
+
+
+if __name__ == "__main__":
+    main()

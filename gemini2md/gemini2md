@@ -1,0 +1,246 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["beautifulsoup4"]
+# ///
+"""Convert Gemini conversation HTML (rendered DOM from clipboard) to Markdown.
+
+Usage:
+    pbpaste | gemini2md              # clipboard to stdout
+    pbpaste | gemini2md -o convo.md  # clipboard to file
+    gemini2md saved.html             # file arg
+    gemini2md saved.html -o out.md   # file to file
+"""
+import sys
+import re
+from pathlib import Path
+from bs4 import BeautifulSoup, NavigableString, Tag
+
+
+def extract_turns(soup: BeautifulSoup) -> list[dict]:
+    """Walk the conversation container and yield (role, content) pairs in order."""
+    turns = []
+
+    container = soup.select_one("chat-window-content, .conversation-container")
+    if not container:
+        container = soup
+
+    for el in container.descendants:
+        if not isinstance(el, Tag):
+            continue
+
+        if el.name == "user-query" and el.parent and el.parent.name != "user-query":
+            text = _extract_user_query(el)
+            if text.strip():
+                turns.append({"role": "user", "content": text.strip()})
+
+        elif el.name == "message-content":
+            md_div = el.select_one("div.markdown")
+            if md_div:
+                md = _html_to_markdown(md_div)
+                if md.strip():
+                    turns.append({"role": "model", "content": md.strip()})
+
+    return turns
+
+
+def _extract_user_query(el: Tag) -> str:
+    lines = []
+    for p in el.select("p.query-text-line"):
+        lines.append(p.get_text(strip=True))
+    return "\n".join(lines)
+
+
+def _html_to_markdown(el: Tag) -> str:
+    parts = []
+    _walk(el, parts, depth=0)
+    text = "".join(parts)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _walk(el, parts: list, depth: int):
+    for child in el.children:
+        if isinstance(child, NavigableString):
+            text = str(child)
+            if text.startswith("<!--"):
+                continue
+            parts.append(text)
+            continue
+
+        if not isinstance(child, Tag):
+            continue
+
+        tag = child.name
+
+        if "cdk-visually-hidden" in child.get("class", []):
+            continue
+        if tag in ("mat-icon", "button", "copy-button", "message-actions",
+                   "style", "script", "bard-avatar"):
+            continue
+
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            level = int(tag[1])
+            parts.append(f"\n\n{'#' * level} ")
+            _walk(child, parts, depth)
+            parts.append("\n\n")
+
+        elif tag == "p":
+            parts.append("\n\n")
+            _walk(child, parts, depth)
+            parts.append("\n\n")
+
+        elif tag in ("strong", "b"):
+            parts.append("**")
+            _walk(child, parts, depth)
+            parts.append("**")
+
+        elif tag in ("em", "i"):
+            parts.append("*")
+            _walk(child, parts, depth)
+            parts.append("*")
+
+        elif tag == "code" and (not child.parent or child.parent.name != "pre"):
+            parts.append("`")
+            parts.append(child.get_text())
+            parts.append("`")
+
+        elif tag == "pre":
+            code_el = child.select_one("code")
+            if code_el:
+                lang = ""
+                for cls in code_el.get("class", []):
+                    if cls.startswith("language-"):
+                        lang = cls[len("language-"):]
+                        break
+                parts.append(f"\n\n```{lang}\n")
+                parts.append(code_el.get_text())
+                parts.append("\n```\n\n")
+            else:
+                parts.append("\n\n```\n")
+                parts.append(child.get_text())
+                parts.append("\n```\n\n")
+
+        elif tag == "ul":
+            parts.append("\n")
+            _walk(child, parts, depth + 1)
+            parts.append("\n")
+
+        elif tag == "ol":
+            parts.append("\n")
+            counter = {"n": 1}
+            for li in child.children:
+                if isinstance(li, Tag) and li.name == "li":
+                    indent = "  " * depth
+                    parts.append(f"{indent}{counter['n']}. ")
+                    _walk(li, parts, depth + 1)
+                    parts.append("\n")
+                    counter["n"] += 1
+            parts.append("\n")
+
+        elif tag == "li" and child.parent and child.parent.name == "ul":
+            indent = "  " * (depth - 1)
+            parts.append(f"{indent}- ")
+            _walk(child, parts, depth)
+            parts.append("\n")
+
+        elif tag == "a":
+            href = child.get("href", "")
+            text_content = child.get_text()
+            if href and text_content:
+                parts.append(f"[{text_content}]({href})")
+            else:
+                _walk(child, parts, depth)
+
+        elif tag == "br":
+            parts.append("\n")
+
+        elif tag == "table":
+            _convert_table(child, parts)
+
+        elif tag == "blockquote":
+            bq_parts: list[str] = []
+            _walk(child, bq_parts, depth)
+            bq_text = "".join(bq_parts).strip()
+            for line in bq_text.split("\n"):
+                parts.append(f"> {line}\n")
+            parts.append("\n")
+
+        elif tag == "hr":
+            parts.append("\n\n---\n\n")
+
+        else:
+            _walk(child, parts, depth)
+
+
+def _convert_table(table: Tag, parts: list):
+    rows = []
+    for tr in table.select("tr"):
+        cells = []
+        for td in tr.select("th, td"):
+            cells.append(td.get_text(strip=True))
+        if cells:
+            rows.append(cells)
+
+    if not rows:
+        return
+
+    ncols = max(len(r) for r in rows)
+    for r in rows:
+        while len(r) < ncols:
+            r.append("")
+
+    parts.append("\n\n")
+    parts.append("| " + " | ".join(rows[0]) + " |\n")
+    parts.append("| " + " | ".join("---" for _ in rows[0]) + " |\n")
+    for row in rows[1:]:
+        parts.append("| " + " | ".join(row) + " |\n")
+    parts.append("\n")
+
+
+def turns_to_markdown(turns: list[dict]) -> str:
+    parts = []
+    for turn in turns:
+        if turn["role"] == "user":
+            parts.append(f"## User\n\n{turn['content']}\n\n")
+        else:
+            parts.append(f"## Gemini\n\n{turn['content']}\n\n")
+
+    return "".join(parts).strip() + "\n"
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Convert Gemini HTML to Markdown")
+    parser.add_argument("input", nargs="?", help="Input HTML file (default: stdin)")
+    parser.add_argument("-o", "--output", help="Output file (default: stdout)")
+    args = parser.parse_args()
+
+    if args.input:
+        html = Path(args.input).read_text()
+    else:
+        html = sys.stdin.read()
+
+    if not html.strip():
+        print("Error: empty input", file=sys.stderr)
+        sys.exit(1)
+
+    soup = BeautifulSoup(html, "html.parser")
+    turns = extract_turns(soup)
+
+    if not turns:
+        print("Error: no conversation turns found", file=sys.stderr)
+        sys.exit(1)
+
+    md = turns_to_markdown(turns)
+
+    if args.output:
+        Path(args.output).write_text(md)
+        print(f"Wrote {len(turns)} turns to {args.output}", file=sys.stderr)
+    else:
+        print(md)
+
+
+if __name__ == "__main__":
+    main()
