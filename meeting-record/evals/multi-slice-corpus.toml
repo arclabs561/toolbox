@@ -1,0 +1,36 @@
+# Multi-slice corpus — 4 distinct 2-min slices of the same real meeting.
+# Different parts of the meeting have different speaker dominance, topic
+# vocabulary, and audio characteristics, so averaging across slices is
+# a more honest baseline than any single slice.
+
+[[clips]]
+id = "M1-00-02"
+path = "~/recordings/test-corpus/meeting-trimmed/m1_2min.flac"
+duration_s = 120.0
+speakers = 5
+ref_transcript = "~/recordings/test-corpus/meeting-trimmed/m1_2min.offline-frozen.txt"
+notes = "first 2 min — opening + V5 environment discussion"
+
+[[clips]]
+id = "M1-05-07"
+path = "~/recordings/test-corpus/meeting-trimmed/m1_2min_off300.flac"
+duration_s = 120.0
+speakers = 5
+ref_transcript = "~/recordings/test-corpus/meeting-trimmed/m1_2min_off300.offline-frozen.txt"
+notes = "5-7 min — supplier onboarding migration"
+
+[[clips]]
+id = "M1-10-12"
+path = "~/recordings/test-corpus/meeting-trimmed/m1_2min_off600.flac"
+duration_s = 120.0
+speakers = 5
+ref_transcript = "~/recordings/test-corpus/meeting-trimmed/m1_2min_off600.offline-frozen.txt"
+notes = "10-12 min — Snowflake / data plane discussion"
+
+[[clips]]
+id = "M1-15-17"
+path = "~/recordings/test-corpus/meeting-trimmed/m1_2min_off900.flac"
+duration_s = 120.0
+speakers = 5
+ref_transcript = "~/recordings/test-corpus/meeting-trimmed/m1_2min_off900.offline-frozen.txt"
+notes = "15-17 min — risks / RAID log / closing"
