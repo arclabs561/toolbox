@@ -1,4 +1,4 @@
-# meeting-record
+# recorder
 
 A personal local Whisper-class stack for Apple Silicon. Two workflows:
 
@@ -9,7 +9,7 @@ All local. No cloud. No data leaves your machine.
 
 Stack: [parakeet-mlx](https://github.com/senstella/parakeet-mlx) for ASR, [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) for diarization, [Ollama](https://ollama.com) for summary + cleanup.
 
-The binary is named `meeting-record` for historical reasons; `dictate` is a first-class subcommand.
+Binary is `recorder`. `dictate` is a first-class subcommand. Older docs / muscle-memory may say `meeting-record`; a `bin/meeting-record` symlink keeps that working.
 
 ## Setup
 
@@ -28,9 +28,9 @@ First run downloads the parakeet model (~600MB) into `~/.cache/huggingface/`. Fi
 ### Dictation (push-to-talk)
 
 ```sh
-meeting-record dictate            # Enter to start, Enter again to stop
-meeting-record dictate --polish   # gemma4 cleanup before clipboard
-meeting-record dictate --save     # also keep .flac + .txt in ~/recordings/
+recorder dictate            # Enter to start, Enter again to stop
+recorder dictate --polish   # gemma4 cleanup before clipboard
+recorder dictate --save     # also keep .flac + .txt in ~/recordings/
 ```
 
 Flow: model warms once, then each Enter cycles record→transcribe→`pbcopy`. Paste with `⌘V` into any app. Idle RAM: ~600MB while the loop is running.
@@ -40,15 +40,15 @@ For a global hotkey (à la SuperWhisper), bind `Fn` or `⌥+Space` in Karabiner-
 ### Recording
 
 ```sh
-meeting-record                       # timestamp name, ~/recordings/, defaults
-meeting-record team-sync             # custom basename
-meeting-record --diarize             # add speaker labels post-meeting
-meeting-record --diarize --summary   # +action items / decisions via gemma4
-meeting-record --no-browser          # skip auto-open of live page
-meeting-record --polish              # EXPERIMENTAL streaming LLM polish (off by default)
-meeting-record --list-devices        # list mics + system-audio hint
-meeting-record --device ":2"         # pick a non-default device
-meeting-record --from-file f.wav     # transcribe an existing file (no mic)
+recorder                       # timestamp name, ~/recordings/, defaults
+recorder team-sync             # custom basename
+recorder --diarize             # add speaker labels post-meeting
+recorder --diarize --summary   # +action items / decisions via gemma4
+recorder --no-browser          # skip auto-open of live page
+recorder --polish              # EXPERIMENTAL streaming LLM polish (off by default)
+recorder --list-devices        # list mics + system-audio hint
+recorder --device ":2"         # pick a non-default device
+recorder --from-file f.wav     # transcribe an existing file (no mic)
 ```
 
 Ctrl-C once = clean stop. Ctrl-C twice = hard exit (everything still flushed). Or use the **stop** button in the live page (no terminal needed).
@@ -56,13 +56,13 @@ Ctrl-C once = clean stop. Ctrl-C twice = hard exit (everything still flushed). O
 ### Subcommands (post-meeting tooling)
 
 ```sh
-meeting-record redo  ~/recordings/<name>.flac          # re-run offline pass
-meeting-record diarize ~/recordings/<name>.flac        # speaker labels
-meeting-record summary ~/recordings/<name>.offline.md  # gemma4 summary
-meeting-record polish  ~/recordings/<name>.offline.md  # gemma4 cleanup
-meeting-record search "V5 environment"                 # FTS5 across all meetings
-meeting-record search --reindex                        # rebuild the index
-meeting-record record search                           # record a meeting NAMED "search"
+recorder redo  ~/recordings/<name>.flac          # re-run offline pass
+recorder diarize ~/recordings/<name>.flac        # speaker labels
+recorder summary ~/recordings/<name>.offline.md  # gemma4 summary
+recorder polish  ~/recordings/<name>.offline.md  # gemma4 cleanup
+recorder search "V5 environment"                 # FTS5 across all meetings
+recorder search --reindex                        # rebuild the index
+recorder record search                           # record a meeting NAMED "search"
 ```
 
 ## Outputs
@@ -129,9 +129,9 @@ The default mic-only setup misses remote participants. With BlackHole installed:
 1. `brew install --cask blackhole-2ch` (requires reboot)
 2. Open Audio MIDI Setup, create an Aggregate Device combining BlackHole + your mic
 3. Set a Multi-Output Device (BlackHole + speakers) as system output during the meeting
-4. `meeting-record --device ':<aggregate-index>' team-sync`
+4. `recorder --device ':<aggregate-index>' team-sync`
 
-`meeting-record --list-devices` detects BlackHole and prints the right index.
+`recorder --list-devices` detects BlackHole and prints the right index.
 
 ## Crash safety
 

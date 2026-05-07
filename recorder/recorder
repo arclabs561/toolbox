@@ -23,12 +23,12 @@ parakeet streaming. Three artifacts land in $MEETING_DIR (default
 A localhost web page also opens automatically with a live-updating view.
 
 Usage:
-    meeting-record [name]            # name defaults to YYYYMMDD-HHMMSS
-    meeting-record --no-browser      # don't auto-open the live page
-    meeting-record --port 8765       # pin a port (default: ephemeral)
-    meeting-record --device ":1"     # override avfoundation audio device
-    meeting-record --list-devices    # list devices and exit
-    meeting-record --from-file f.wav # transcribe an existing file (no mic)
+    recorder [name]            # name defaults to YYYYMMDD-HHMMSS
+    recorder --no-browser      # don't auto-open the live page
+    recorder --port 8765       # pin a port (default: ephemeral)
+    recorder --device ":1"     # override avfoundation audio device
+    recorder --list-devices    # list devices and exit
+    recorder --from-file f.wav # transcribe an existing file (no mic)
 
 To chat about the transcript in Claude Code mid-meeting or after:
     @~/recordings/<name>.md  what were the action items?
@@ -127,7 +127,7 @@ def list_devices() -> int:
             sys.stderr.write(
                 f"  detected aggregate device: [{i}] {n}\n"
                 f"  to capture mic + system audio together:\n"
-                f"      meeting-record --device ':{i}' <name>\n"
+                f"      recorder --device ':{i}' <name>\n"
             )
         elif bh:
             i, n = bh[0]
@@ -137,7 +137,7 @@ def list_devices() -> int:
                 f"  1. open Audio MIDI Setup\n"
                 f"  2. create an Aggregate Device combining BlackHole + your mic\n"
                 f"  3. set a Multi-Output Device (BlackHole + speakers) as system output\n"
-                f"  4. then: meeting-record --device ':<aggregate-index>' <name>\n"
+                f"  4. then: recorder --device ':<aggregate-index>' <name>\n"
             )
     else:
         sys.stderr.write(
@@ -365,7 +365,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>meeting-record · live</title>
+<title>recorder · live</title>
 <style>
 :root {
   /* Light: warm paper, dark ink. Avoid pure black/white (halation on screens). */
@@ -2877,7 +2877,7 @@ def _dictate_trigger(rest: list[str]) -> int:
 
     Exits 0 on success, 1 if the daemon isn't running, 2 on protocol error.
     """
-    p = argparse.ArgumentParser(prog="meeting-record dictate trigger")
+    p = argparse.ArgumentParser(prog="recorder dictate trigger")
     p.add_argument("--paste", action="store_true",
                    help="after transcription completes, paste into focused app")
     p.add_argument("--status", action="store_true",
@@ -2887,7 +2887,7 @@ def _dictate_trigger(rest: list[str]) -> int:
     if not DICTATE_SOCK.exists():
         print(
             f"dictate daemon not running. start with:\n"
-            f"  meeting-record dictate --daemon",
+            f"  recorder dictate --daemon",
             file=sys.stderr,
         )
         return 1
@@ -3103,9 +3103,9 @@ def _dictate_daemon(args) -> int:
     print(f"daemon ready (socket: {DICTATE_SOCK})", file=sys.stderr)
     print(
         "trigger with:\n"
-        "  meeting-record dictate trigger             # toggle, copy to clipboard\n"
-        "  meeting-record dictate trigger --paste     # toggle, also paste\n"
-        "  meeting-record dictate trigger --status    # show current state\n"
+        "  recorder dictate trigger             # toggle, copy to clipboard\n"
+        "  recorder dictate trigger --paste     # toggle, also paste\n"
+        "  recorder dictate trigger --status    # show current state\n"
         "ctrl-c to stop daemon.",
         file=sys.stderr, flush=True,
     )
@@ -3161,9 +3161,9 @@ def cmd_dictate(rest: list[str]) -> int:
     """Push-to-talk dictation.
 
     Three modes:
-      meeting-record dictate                    # interactive (Enter toggles)
-      meeting-record dictate --daemon           # long-running, listens on unix socket
-      meeting-record dictate trigger [--paste]  # send start/stop to a running daemon
+      recorder dictate                    # interactive (Enter toggles)
+      recorder dictate --daemon           # long-running, listens on unix socket
+      recorder dictate trigger [--paste]  # send start/stop to a running daemon
 
     For SuperWhisper-class global-hotkey UX:
       1. Run `recorder dictate --daemon` (e.g. via launchd plist, see README)
@@ -3174,7 +3174,7 @@ def cmd_dictate(rest: list[str]) -> int:
     if rest and rest[0] == "trigger":
         return _dictate_trigger(rest[1:])
 
-    p = argparse.ArgumentParser(prog="meeting-record dictate")
+    p = argparse.ArgumentParser(prog="recorder dictate")
     p.add_argument("--device", default=os.environ.get("MEETING_DEVICE", ":0"))
     p.add_argument("--model", default=os.environ.get(
         "PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3"))
@@ -3323,7 +3323,7 @@ def cmd_dictate(rest: list[str]) -> int:
 
 
 def cmd_diarize_cli(rest: list[str]) -> int:
-    p = argparse.ArgumentParser(prog="meeting-record diarize")
+    p = argparse.ArgumentParser(prog="recorder diarize")
     p.add_argument("flac", help="path to a saved FLAC")
     p.add_argument("--num-speakers", type=int, default=-1,
                    help="pin speaker count (default -1 = auto-detect)")
@@ -3346,7 +3346,7 @@ def cmd_diarize_cli(rest: list[str]) -> int:
     json_path = flac_path.parent / f"{name}.offline.json"
     if not json_path.exists():
         print(f"need offline pass first: {json_path} not found.\n"
-              f"  run: meeting-record redo {flac_path}",
+              f"  run: recorder redo {flac_path}",
               file=sys.stderr)
         return 1
     md = run_diarize_pass(
@@ -3435,7 +3435,7 @@ def _index_after_offline(md_path: Path, name: str) -> None:
 
 
 def cmd_search(rest: list[str]) -> int:
-    p = argparse.ArgumentParser(prog="meeting-record search")
+    p = argparse.ArgumentParser(prog="recorder search")
     p.add_argument("query", nargs="?", help="full-text query (FTS5 syntax)")
     p.add_argument("--reindex", action="store_true",
                    help="rebuild the index from ~/recordings/*.offline.md (or .md fallback)")
@@ -3497,7 +3497,7 @@ def cmd_search(rest: list[str]) -> int:
             rows = cur.fetchall()
         except sqlite3.OperationalError as e:
             print(f"search query syntax error: {e}\n"
-                  f"  try simpler keywords, e.g. `meeting-record search budget`",
+                  f"  try simpler keywords, e.g. `recorder search budget`",
                   file=sys.stderr)
             return 1
     if not rows:
@@ -3515,7 +3515,7 @@ def cmd_search(rest: list[str]) -> int:
 
 def cmd_polish_cli(rest: list[str]) -> int:
     p = argparse.ArgumentParser(
-        prog="meeting-record polish",
+        prog="recorder polish",
         description=(
             "Run gemma4 polish on a saved transcript. CAUTION: per the "
             "polish-ab eval (evals/run_eval.py --mode polish-ab), this can "
@@ -3538,7 +3538,7 @@ def cmd_polish_cli(rest: list[str]) -> int:
 # ---------- redo: re-run offline pass on an existing FLAC ----------
 
 def cmd_redo(rest: list[str]) -> int:
-    p = argparse.ArgumentParser(prog="meeting-record redo")
+    p = argparse.ArgumentParser(prog="recorder redo")
     p.add_argument("flac", help="path to a saved FLAC")
     p.add_argument("--model", default=os.environ.get(
         "PARAKEET_MODEL", "mlx-community/parakeet-tdt-0.6b-v3"))
@@ -3592,7 +3592,7 @@ def cmd_redo(rest: list[str]) -> int:
 # ---------- summary CLI ----------
 
 def cmd_summary_cli(rest: list[str]) -> int:
-    p = argparse.ArgumentParser(prog="meeting-record summary")
+    p = argparse.ArgumentParser(prog="recorder summary")
     p.add_argument("transcript",
                    help="path to a transcript .md (offline preferred)")
     p.add_argument("--model", default=os.environ.get(
@@ -3618,13 +3618,13 @@ def cmd_summary_cli(rest: list[str]) -> int:
 
 def main() -> int:
     # Dispatch to subcommands when the first positional arg is one of the
-    # reserved verbs. Preserves the simple `meeting-record <name>` UX while
-    # adding `meeting-record search ...`, `polish ...`, `redo ...`.
+    # reserved verbs. Preserves the simple `recorder <name>` UX while
+    # adding `recorder search ...`, `polish ...`, `redo ...`.
     #
     # F1 collision guard: a recording legitimately named "search" / "polish"
     # / "redo" / "summary" must not silently dispatch to the subcommand.
     # Disambiguation: if the user wants a recording with one of these names,
-    # they pass `record search` explicitly. Bare `meeting-record search`
+    # they pass `record search` explicitly. Bare `recorder search`
     # always dispatches to subcommand.
     SUBCOMMANDS = {"search", "polish", "redo", "summary", "diarize", "dictate"}
     argv = sys.argv[1:]
@@ -3800,7 +3800,7 @@ def main() -> int:
 
     # Write txt header up-front
     txt_header = (
-        f"# meeting-record\n"
+        f"# recorder\n"
         f"# name:    {name}\n"
         f"# started: {started_str}\n"
         f"# model:   {args.model}\n"
