@@ -18,6 +18,7 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | [check-math](check-math/) | Verify math rendering in HTML/Markdown |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
 | [ips](ips/) | Show local and public IP addresses |
+| [meeting-record](meeting-record/) | Record + realtime transcribe via parakeet-mlx, with crash-safe FLAC backup |
 | [reflow](reflow/) | Reflow Markdown text preserving code blocks |
 | [toks](toks/) | Count tokens (tiktoken) |
 | [webshot](webshot/) | Screenshot URLs and extract page metadata |

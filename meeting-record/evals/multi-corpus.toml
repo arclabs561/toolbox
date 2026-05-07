@@ -1,0 +1,29 @@
+# Multi-clip eval — averages over heterogeneous audio so the headline
+# WER number isn't dominated by one clip's idiosyncrasies.
+
+[[clips]]
+id = "L1-clean"
+path = "~/recordings/test-corpus/librispeech/1272-128104-0000.flac"
+duration_s = 14.0
+speakers = 1
+ref_transcript = "~/recordings/test-corpus/librispeech/1272-128104.trans.txt"
+ref_rttm = ""
+notes = "LibriSpeech clean baseline"
+
+[[clips]]
+id = "L2-clean"
+path = "~/recordings/test-corpus/librispeech/1272-128104-0001.flac"
+duration_s = 9.0
+speakers = 1
+ref_transcript = "~/recordings/test-corpus/librispeech/1272-128104.trans.txt"
+ref_rttm = ""
+notes = "LibriSpeech clean baseline"
+
+[[clips]]
+id = "M1-2min"
+path = "~/recordings/test-corpus/meeting-trimmed/m1_2min.flac"
+duration_s = 120.0
+speakers = 5
+ref_transcript = "~/recordings/test-corpus/meeting-trimmed/m1_2min.offline-frozen.txt"
+ref_rttm = ""
+notes = "real meeting first 2min; ref=frozen offline parakeet"
