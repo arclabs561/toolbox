@@ -105,6 +105,43 @@ def device_label(device: str) -> str:
     return device
 
 
+def auto_detect_device(user_device: str, env_set: bool) -> str:
+    """Opportunistically prefer a BlackHole-containing aggregate device
+    when the user hasn't pinned one explicitly.
+
+    Returns the device string to actually use. Logs to stderr when the
+    auto-detected device differs from the default. Stays silent when no
+    aggregate is present (the default :0 works fine for mic-only).
+
+    Triggers ONLY when:
+      - user did not pass --device on the CLI (default ":0")
+      - MEETING_DEVICE env var is unset
+      - an avfoundation aggregate device whose name contains "blackhole"
+        OR whose name suggests it's an aggregate is present
+    """
+    if user_device != ":0" or env_set:
+        return user_device
+    try:
+        devs = avfoundation_devices()
+    except Exception:
+        return user_device
+    bh_agg = [(i, n) for i, n in devs
+              if "blackhole" in n.lower() and ("aggregate" in n.lower()
+                                                or "+" in n
+                                                or "recorder" in n.lower())]
+    plain_agg = [(i, n) for i, n in devs
+                 if "aggregate" in n.lower() and i != "0"]
+    pick = (bh_agg or plain_agg)[:1]
+    if not pick:
+        return user_device
+    i, n = pick[0]
+    sys.stderr.write(
+        f"[auto-detect] using aggregate device :{i} ({n}). "
+        f"pass --device ':0' to force mic-only.\n"
+    )
+    return f":{i}"
+
+
 def list_devices() -> int:
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-f", "avfoundation",
@@ -3687,6 +3724,12 @@ def main() -> int:
 
     if args.list_devices:
         return list_devices()
+
+    # Opportunistic system-audio capture: if a BlackHole-containing
+    # aggregate device exists and the user didn't pin --device, prefer it.
+    args.device = auto_detect_device(
+        args.device, env_set=("MEETING_DEVICE" in os.environ)
+    )
 
     out_dir = Path(os.environ.get(
         "MEETING_DIR", str(Path.home() / "recordings")))
