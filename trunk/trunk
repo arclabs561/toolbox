@@ -1,0 +1,59 @@
+#!/bin/bash
+
+# Print the trunk branch of the current git repo.
+# Falls back gracefully when origin/HEAD is missing.
+#
+#   trunk            short name (main, develop, trunk, ...)
+#   trunk --remote   remote-qualified (origin/develop)
+#   trunk --refresh  refresh origin/HEAD from the remote first
+
+set -e
+
+remote=0
+refresh=0
+for arg in "$@"; do
+  case "$arg" in
+    --remote|-r) remote=1 ;;
+    --refresh)   refresh=1 ;;
+    -h|--help)
+      sed -n '3,10p' "$0" | sed 's/^# \?//'
+      exit 0
+      ;;
+    *)
+      echo "trunk: unknown arg: $arg" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "trunk: not in a git repo" >&2
+  exit 1
+fi
+
+if [ "$refresh" = 1 ]; then
+  git remote set-head origin -a >/dev/null 2>&1 || true
+fi
+
+# Tier 1: origin/HEAD symbolic-ref (canonical).
+if ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null); then
+  branch=${ref#refs/remotes/origin/}
+# Tier 2: re-derive from the remote without writing.
+elif ref=$(git ls-remote --symref origin HEAD 2>/dev/null | awk '/^ref:/ {print $2; exit}'); then
+  branch=${ref#refs/heads/}
+# Tier 3: best-guess based on local branches.
+else
+  for cand in main develop trunk master; do
+    if git show-ref --verify --quiet "refs/heads/$cand"; then
+      branch=$cand
+      break
+    fi
+  done
+  branch=${branch:-main}
+fi
+
+if [ "$remote" = 1 ]; then
+  echo "origin/$branch"
+else
+  echo "$branch"
+fi

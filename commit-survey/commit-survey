@@ -1,0 +1,215 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Survey a git repo's commit, branch, and merge conventions.
+
+Quick-orient an unfamiliar repo by measuring how the team writes
+commits, names branches, and ships work. Replaces the parametric-memory
+guesswork with one read pass over local git state.
+
+Usage:
+  commit-survey                 # current repo, last 500 commits
+  commit-survey -n 1000         # last 1000 commits
+  commit-survey --window 90d    # last 90 days only
+  commit-survey /path/to/repo   # surveyed repo path
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+TICKET_RX = re.compile(r"@?[A-Z]{1,4}-\d{2,}")
+SCOPE_RX = re.compile(r"^([\w./+-]+):\s")
+TRAILER_RX = re.compile(
+    r"^(refs|fixes|closes|see|relates|co-authored-by|signed-off-by):",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def sh(args: list[str], cwd: Path) -> str:
+    res = subprocess.run(
+        args, cwd=cwd, capture_output=True, text=True, check=False
+    )
+    return res.stdout
+
+
+def trunk(cwd: Path) -> str:
+    out = sh(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd
+    ).strip()
+    if out:
+        return out.removeprefix("refs/remotes/origin/")
+    out = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd).strip()
+    return out or "?"
+
+
+def histogram(items: list[str], top: int = 10) -> list[tuple[str, int]]:
+    return Counter(items).most_common(top)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("path", nargs="?", default=".", type=Path)
+    ap.add_argument("-n", "--limit", type=int, default=500)
+    ap.add_argument(
+        "--window",
+        default=None,
+        help="git --since arg, e.g. '90 days ago' or '6 months ago'",
+    )
+    args = ap.parse_args()
+
+    repo = args.path.resolve()
+    if not (repo / ".git").exists() and not sh(
+        ["git", "rev-parse", "--git-dir"], repo
+    ).strip():
+        print(f"commit-survey: not a git repo: {repo}", file=sys.stderr)
+        return 1
+
+    print(f"repo:  {repo}")
+    print(f"trunk: {trunk(repo)}")
+
+    log_args = ["git", "log", f"-n{args.limit}", "--no-merges"]
+    if args.window:
+        log_args.append(f"--since={args.window}")
+
+    subjects = sh(log_args + ["--format=%s"], repo).splitlines()
+    bodies = sh(log_args + ["--format=%B%x00"], repo).split("\0")
+    merges = sh(
+        ["git", "log", f"-n{args.limit}", "--merges", "--format=%P"], repo
+    ).splitlines()
+
+    if not subjects:
+        print("\n(no commits matched the window/limit)")
+        return 0
+
+    print(f"\ncommits sampled: {len(subjects)} non-merge")
+    print(f"merge commits sampled: {len(merges)}")
+
+    # Merge strategy.
+    parent_counts = [len(p.split()) for p in merges if p]
+    multi_parent = sum(1 for c in parent_counts if c >= 2)
+    if merges:
+        pct = 100 * multi_parent / len(merges)
+        if pct >= 80:
+            mode = "merge commits (no squash)"
+        elif pct >= 30:
+            mode = f"mixed ({pct:.0f}% multi-parent)"
+        else:
+            mode = "squash or rebase (mostly single-parent)"
+        print(f"merge strategy: {mode}")
+    else:
+        print("merge strategy: no merges in window")
+
+    # Scope prefix histogram.
+    scopes = []
+    for s in subjects:
+        m = SCOPE_RX.match(s)
+        if m:
+            scopes.append(m.group(1))
+    if scopes:
+        pct_scoped = 100 * len(scopes) / len(subjects)
+        print(f"\nscope-prefixed subjects: {pct_scoped:.0f}%")
+        for scope, n in histogram(scopes, top=10):
+            print(f"  {n:>4}  {scope}")
+
+    # Ticket syntax.
+    tickets = []
+    leading_tickets = 0
+    for s in subjects:
+        hits = TICKET_RX.findall(s)
+        tickets += hits
+        if hits and TICKET_RX.match(s.strip()):
+            leading_tickets += 1
+    if tickets:
+        unique = len(set(tickets))
+        prefixes = histogram(
+            [t.split("-")[0].lstrip("@") for t in tickets], top=5
+        )
+        print(
+            f"\nticket refs: {len(tickets)} hits "
+            f"({unique} unique), "
+            f"{100 * leading_tickets / len(subjects):.0f}% at title start"
+        )
+        for prefix, n in prefixes:
+            print(f"  {n:>4}  {prefix}-XXXXX")
+
+    # Trailers in bodies.
+    trailers = Counter()
+    for body in bodies:
+        for m in TRAILER_RX.finditer(body):
+            trailers[m.group(1).lower()] += 1
+    if trailers:
+        print("\ntrailers in bodies:")
+        for name, n in trailers.most_common():
+            print(f"  {n:>4}  {name}:")
+
+    # Casing of subject after scope/ticket.
+    cap_count = 0
+    low_count = 0
+    for s in subjects:
+        # Strip leading scope: or @TICKET[: ]
+        body = s
+        m = SCOPE_RX.match(body)
+        if m:
+            body = body[m.end():].lstrip()
+        m = re.match(r"@?[A-Z]{1,4}-\d+[: ]+", body)
+        if m:
+            body = body[m.end():].lstrip()
+        if not body:
+            continue
+        first = body[0]
+        if first.isupper():
+            cap_count += 1
+        elif first.islower():
+            low_count += 1
+    if cap_count + low_count:
+        print(
+            f"\nsubject casing after scope/ticket: "
+            f"{low_count} lowercase, {cap_count} capitalized "
+            f"({100 * low_count / (cap_count + low_count):.0f}% lowercase)"
+        )
+
+    # Branch families.
+    branches = sh(
+        [
+            "git",
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/remotes/origin/",
+        ],
+        repo,
+    ).splitlines()
+    families = []
+    for b in branches:
+        b = b.removeprefix("origin/")
+        if "/" in b:
+            families.append(b.split("/", 1)[0] + "/")
+    if families:
+        print(f"\nbranch prefixes ({len(branches)} total branches):")
+        for fam, n in histogram(families, top=10):
+            print(f"  {n:>4}  {fam}")
+
+    # Body-presence rate: how often do commits have a non-trivial body?
+    bodied = 0
+    for b in bodies:
+        lines = b.strip().splitlines()
+        if len(lines) > 2 and any(line.strip() for line in lines[2:]):
+            bodied += 1
+    if subjects:
+        pct = 100 * bodied / len(subjects)
+        print(
+            f"\ncommit-body presence: {pct:.0f}% have prose beyond the subject"
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
