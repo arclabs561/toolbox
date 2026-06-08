@@ -40,7 +40,9 @@ def resolve_target(target: str) -> tuple[str, Path | None]:
     """Return (url, tmp_file_or_none). Handles URLs, local files, and stdin (-)."""
     if target == "-":
         html = sys.stdin.read()
-        tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w")
+        # delete=False so the file outlives this function for the browser to load;
+        # the caller unlinks it. A context manager would delete it too early.
+        tmp = tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w")  # noqa: SIM115
         tmp.write(html)
         tmp.close()
         return f"file://{tmp.name}", Path(tmp.name)
@@ -98,7 +100,7 @@ def cmd_shot(args: argparse.Namespace) -> None:
             if args.dark:
                 page.emulate_media(color_scheme="dark")
 
-            page.goto(url, wait_until="networkidle", timeout=args.timeout * 1000)
+            page.goto(url, wait_until=args.wait_until, timeout=args.timeout * 1000)
 
             if args.wait:
                 page.wait_for_timeout(int(args.wait * 1000))
@@ -141,7 +143,12 @@ _META_NOISE_PATTERNS = re.compile(
 )
 
 
-_META_NOISE_HTTP_EQUIV = {"x-pjax-version", "x-pjax-csp-version", "x-pjax-css-version", "x-pjax-js-version"}
+_META_NOISE_HTTP_EQUIV = {
+    "x-pjax-version",
+    "x-pjax-csp-version",
+    "x-pjax-css-version",
+    "x-pjax-js-version",
+}
 
 
 def _is_noise_tag(tag: dict) -> bool:
@@ -159,13 +166,14 @@ def _is_noise_tag(tag: dict) -> bool:
 def cmd_meta(args: argparse.Namespace) -> None:
     url, tmp = resolve_target(args.target)
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        page = browser.new_page()
-        page.goto(url, wait_until="networkidle", timeout=args.timeout * 1000)
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page()
+            page.goto(url, wait_until=args.wait_until, timeout=args.timeout * 1000)
 
-        meta = page.evaluate(
-            """() => {
+            meta = page.evaluate(
+                """() => {
             const get = (sel) => {
                 const el = document.querySelector(sel);
                 return el ? el.getAttribute('content') || el.textContent || null : null;
@@ -211,19 +219,22 @@ def cmd_meta(args: argparse.Namespace) -> None:
                 meta_tags: getAll('meta'),
             };
         }"""
-        )
-        browser.close()
-
-    if tmp:
-        tmp.unlink()
+            )
+            browser.close()
+    finally:
+        if tmp:
+            tmp.unlink()
 
     # filter noisy meta tags unless --all
     if not args.all:
         meta["meta_tags"] = [t for t in meta.get("meta_tags", []) if not _is_noise_tag(t)]
         # og:/twitter: already captured in structured dicts -- remove from raw list
         meta["meta_tags"] = [
-            t for t in meta["meta_tags"]
-            if not (t.get("property", "").startswith("og:") or t.get("name", "").startswith("twitter:"))
+            t
+            for t in meta["meta_tags"]
+            if not (
+                t.get("property", "").startswith("og:") or t.get("name", "").startswith("twitter:")
+            )
         ]
 
     # strip null/empty values
@@ -282,13 +293,29 @@ def main() -> None:
     p_shot.add_argument("--quality", type=int, default=85, help="JPEG quality 0-100 (default: 85)")
     p_shot.add_argument("--wait", type=float, default=0, help="Extra wait in seconds after load")
     p_shot.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
+    p_shot.add_argument(
+        "--wait-until",
+        choices=("load", "domcontentloaded", "networkidle", "commit"),
+        default="load",
+        help="Navigation readiness signal (default: load). 'networkidle' can hang "
+        "on pages with polling/SSE; prefer 'load' plus --wait.",
+    )
 
     # -- meta --
     p_meta = sub.add_parser("meta", help="Extract page metadata")
     p_meta.add_argument("target", help="URL, local HTML file, or - for stdin")
     p_meta.add_argument("--json", action="store_true", help="Output as JSON")
-    p_meta.add_argument("--all", action="store_true", help="Include all meta tags (no noise filter)")
+    p_meta.add_argument(
+        "--all", action="store_true", help="Include all meta tags (no noise filter)"
+    )
     p_meta.add_argument("--timeout", type=int, default=30, help="Navigation timeout in seconds")
+    p_meta.add_argument(
+        "--wait-until",
+        choices=("load", "domcontentloaded", "networkidle", "commit"),
+        default="domcontentloaded",
+        help="Navigation readiness signal (default: domcontentloaded; metadata is "
+        "in the DOM at that point).",
+    )
 
     args = parser.parse_args()
     if args.cmd == "shot":
