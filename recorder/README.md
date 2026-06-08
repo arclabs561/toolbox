@@ -2,8 +2,8 @@
 
 A personal local Whisper-class stack for Apple Silicon. Two workflows:
 
-1. **Dictate** -- push-to-talk to transcript on your clipboard. SuperWhisper-style, but local, free, and yours.
-2. **Record** -- full meeting capture with live web UI, speaker diarization, summary, search across past meetings.
+1. **Dictate**: push-to-talk to transcript on your clipboard. SuperWhisper-style, but local, free, and yours.
+2. **Record**: full meeting capture with live web UI, speaker diarization, summary, search across past meetings.
 
 All local. No cloud. No data leaves your machine.
 
@@ -21,7 +21,7 @@ brew install --cask blackhole-2ch
 ollama pull gemma4:e2b   # or gemma4:latest if you have headroom
 ```
 
-First run downloads the parakeet model (~600MB) into `~/.cache/huggingface/`. First `--diarize` run downloads ~35MB of sherpa-onnx models into `~/.cache/meeting-record/`. The terminal app needs Microphone permission (System Settings > Privacy & Security > Microphone) -- the watchdog warns within 5 seconds if access was denied.
+First run downloads the parakeet model (~600MB) into `~/.cache/huggingface/`. First `--diarize` run downloads ~35MB of sherpa-onnx models into `~/.cache/meeting-record/`. The terminal app needs Microphone permission (System Settings > Privacy & Security > Microphone); the watchdog warns within 5 seconds if access was denied.
 
 Without BlackHole you only capture room audio: your voice plus your speakers playing the remote feed at low SNR. BlackHole routes the clean digital mix.
 
@@ -46,6 +46,7 @@ recorder team-sync                 # custom basename
 recorder --diarize                 # add speaker labels post-meeting
 recorder --diarize --summary       # + action items / decisions via gemma4
 recorder --polish                  # EXPERIMENTAL streaming LLM polish
+recorder --no-offline-pass         # skip offline transcription pass (faster teardown)
 recorder --no-browser              # skip auto-open of live page
 recorder --from-file meeting.wav   # transcribe an existing file (no mic)
 recorder --list-devices            # list available audio devices
@@ -53,6 +54,8 @@ recorder --device ":2"             # pick a non-default device
 ```
 
 A browser tab opens automatically to the live transcript page. Ctrl-C once = clean stop (everything flushed). Ctrl-C twice = hard exit. The **stop** button in the live page also works without touching the terminal.
+
+After the meeting ends, `recorder` automatically runs a higher-accuracy offline transcription pass (unless `--no-offline-pass` is set). The offline `.md` and `.txt` files land in the same directory when it finishes. Progress is shown in the terminal; the live page keeps the streaming transcript visible while it runs.
 
 ## Quick start: push-to-talk dictation
 
@@ -70,13 +73,16 @@ For a global hotkey (SuperWhisper-style), bind `Fn` or `Opt+Space` in Karabiner-
 
 ```sh
 recorder redo  ~/recordings/<name>.flac          # re-run offline transcription pass
-recorder diarize ~/recordings/<name>.flac        # add speaker labels
+recorder diarize ~/recordings/<name>.flac        # add speaker labels (--threshold 0.65)
+recorder diarize --num-speakers 3 ~/recordings/<name>.flac  # hint expected count
 recorder summary ~/recordings/<name>.offline.md  # gemma4 structured summary
 recorder polish  ~/recordings/<name>.offline.md  # gemma4 cleanup
 recorder search "V5 environment"                 # FTS5 search across all meetings
 recorder search --reindex                        # rebuild the search index
 recorder record search                           # record a meeting NAMED "search"
 ```
+
+`redo` re-runs the full offline pass including the accuracy improvement from `depth=8` attention. Use it to upgrade old recordings captured before the current defaults.
 
 ## Outputs
 
@@ -112,7 +118,7 @@ A localhost page opens automatically. SSE-driven: no polling, auto-reconnects, s
 | `S` | stop | graceful shutdown (confirmation modal) |
 | `Esc` | -- | close find / help / dialog |
 
-The header shows: meeting name, started time, audio + wall durations, input device, polish status (when on), and a `live`/`reconnecting`/`stopped` connection indicator. The status pill pulses while recording and includes a 9-bar peak-dB meter for the mic -- silence reads as silence, normal speech lights ~5 bars green, clipping flashes red.
+The header shows: meeting name, started time, audio + wall durations, input device, polish status (when on), and a `live`/`reconnecting`/`stopped` connection indicator. The status pill pulses while recording and includes a 9-bar peak-dB meter for the mic (silence reads as silence, normal speech lights ~5 bars green, clipping flashes red).
 
 Below the header: a collapsible **markers** TOC listing every 5-min timestamp plus user marks (`M`), each linking back to its position in the transcript. Sticky file paths underneath so you always know where artifacts are landing.
 
