@@ -15,10 +15,10 @@ Usage:
   commit-survey --window 90d    # last 90 days only
   commit-survey /path/to/repo   # surveyed repo path
 """
+
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
@@ -34,16 +34,12 @@ TRAILER_RX = re.compile(
 
 
 def sh(args: list[str], cwd: Path) -> str:
-    res = subprocess.run(
-        args, cwd=cwd, capture_output=True, text=True, check=False
-    )
+    res = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
     return res.stdout
 
 
 def trunk(cwd: Path) -> str:
-    out = sh(
-        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd
-    ).strip()
+    out = sh(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd).strip()
     if out:
         return out.removeprefix("refs/remotes/origin/")
     out = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd).strip()
@@ -66,9 +62,7 @@ def main() -> int:
     args = ap.parse_args()
 
     repo = args.path.resolve()
-    if not (repo / ".git").exists() and not sh(
-        ["git", "rev-parse", "--git-dir"], repo
-    ).strip():
+    if not (repo / ".git").exists() and not sh(["git", "rev-parse", "--git-dir"], repo).strip():
         print(f"commit-survey: not a git repo: {repo}", file=sys.stderr)
         return 1
 
@@ -81,9 +75,7 @@ def main() -> int:
 
     subjects = sh(log_args + ["--format=%s"], repo).splitlines()
     bodies = sh(log_args + ["--format=%B%x00"], repo).split("\0")
-    merges = sh(
-        ["git", "log", f"-n{args.limit}", "--merges", "--format=%P"], repo
-    ).splitlines()
+    merges = sh(["git", "log", f"-n{args.limit}", "--merges", "--format=%P"], repo).splitlines()
 
     if not subjects:
         print("\n(no commits matched the window/limit)")
@@ -129,9 +121,7 @@ def main() -> int:
             leading_tickets += 1
     if tickets:
         unique = len(set(tickets))
-        prefixes = histogram(
-            [t.split("-")[0].lstrip("@") for t in tickets], top=5
-        )
+        prefixes = histogram([t.split("-")[0].lstrip("@") for t in tickets], top=5)
         print(
             f"\nticket refs: {len(tickets)} hits "
             f"({unique} unique), "
@@ -158,10 +148,10 @@ def main() -> int:
         body = s
         m = SCOPE_RX.match(body)
         if m:
-            body = body[m.end():].lstrip()
+            body = body[m.end() :].lstrip()
         m = re.match(r"@?[A-Z]{1,4}-\d+[: ]+", body)
         if m:
-            body = body[m.end():].lstrip()
+            body = body[m.end() :].lstrip()
         if not body:
             continue
         first = body[0]
@@ -204,9 +194,7 @@ def main() -> int:
             bodied += 1
     if subjects:
         pct = 100 * bodied / len(subjects)
-        print(
-            f"\ncommit-body presence: {pct:.0f}% have prose beyond the subject"
-        )
+        print(f"\ncommit-body presence: {pct:.0f}% have prose beyond the subject")
 
     return 0
 
