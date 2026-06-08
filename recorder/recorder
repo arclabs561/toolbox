@@ -2574,6 +2574,10 @@ class StreamingPolisher:
             self.work_queue.put_nowait(None)
         except queue.Full:
             pass
+        if self.thread is not None:
+            # bounded join so a polish pass in flight can't mutate state after
+            # the final .md is written; the daemon thread is reaped at exit.
+            self.thread.join(timeout=5)
 
     def maybe_trigger(self) -> None:
         """Call after each chunk; decides whether to enqueue a polish job.
@@ -3061,14 +3065,15 @@ def _dictate_daemon(args) -> int:
 
         samples = np.frombuffer(bytes(samples_buf), dtype=np.float32)
         audio_s = len(samples) / SAMPLE_RATE
+        tmp_wav = Path("/tmp") / f"_dictate_daemon_{os.getpid()}.wav"
         try:
             import soundfile as sf
-            tmp_wav = Path("/tmp") / f"_dictate_daemon_{os.getpid()}.wav"
             sf.write(str(tmp_wav), samples, SAMPLE_RATE)
             result = model.transcribe(str(tmp_wav))
-            tmp_wav.unlink(missing_ok=True)
         except Exception as e:
             return f"○ transcribe failed: {e}"
+        finally:
+            tmp_wav.unlink(missing_ok=True)
 
         text = (result.text or "").strip()
         if not text:
@@ -3301,17 +3306,18 @@ def cmd_dictate(rest: list[str]) -> int:
         audio_s = len(samples) / SAMPLE_RATE
         print(f"○ transcribing ({audio_s:.1f}s) ...", file=sys.stderr)
         t0 = time.time()
+        tmp_wav = Path("/tmp") / f"_dictate_{os.getpid()}.wav"
         try:
             # Pass numpy directly via mx; parakeet's transcribe wants a path
             # or array. Write a tiny WAV to /tmp and call transcribe.
             import soundfile as sf
-            tmp_wav = Path("/tmp") / f"_dictate_{os.getpid()}.wav"
             sf.write(str(tmp_wav), samples, SAMPLE_RATE)
             result = model.transcribe(str(tmp_wav))
-            tmp_wav.unlink(missing_ok=True)
         except Exception as e:
             print(f"transcribe failed: {e}", file=sys.stderr)
             continue
+        finally:
+            tmp_wav.unlink(missing_ok=True)
         text = (result.text or "").strip()
         elapsed = time.time() - t0
 
@@ -3857,14 +3863,32 @@ def main() -> int:
 
     interrupts = 0
 
+    hard_exiting = False
+
     def stop(*_):
-        nonlocal interrupts
+        nonlocal interrupts, hard_exiting
         interrupts += 1
-        if interrupts >= 2:
+        if interrupts >= 2 and not hard_exiting:
+            hard_exiting = True  # a third ctrl-C must not re-enter this block
             sys.stderr.write("\nhard exit\n")
-            os.fsync(txt_fd)
+            try:
+                os.fsync(txt_fd)
+            except OSError:
+                pass  # txt_fd may already be closed by the finally block
             if ffmpeg.poll() is None:
-                ffmpeg.kill()
+                # ffmpeg already got SIGINT from the terminal; give it a bounded
+                # moment to flush the FLAC trailer before forcing it, so even the
+                # abort path stays playable.
+                ffmpeg.send_signal(signal.SIGINT)
+                try:
+                    ffmpeg.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    ffmpeg.kill()
+            # os._exit skips the finally, so clean up a half-written .md.tmp.
+            try:
+                os.unlink(str(md_path.with_suffix(md_path.suffix + ".tmp")))
+            except OSError:
+                pass
             os._exit(130)
 
     signal.signal(signal.SIGINT, stop)
