@@ -6,7 +6,7 @@
 #   cat README.md | bcat -t md
 #   bcat < style.css
 
-set -e
+set -euo pipefail
 
 ext="html"
 while getopts "t:" opt; do
@@ -17,8 +17,14 @@ while getopts "t:" opt; do
 done
 shift $((OPTIND - 1))
 
-dir=$(mktemp -d)
-path="$dir/file.$ext"
+# Stable scratch dir so we don't leak a fresh mktemp -d on every invocation.
+# Prune files older than an hour to keep it bounded without clobbering files
+# a browser tab may still be reading from a recent call.
+dir="${TMPDIR:-/tmp}/bcat"
+mkdir -p "$dir"
+find "$dir" -type f -mmin +60 -delete 2>/dev/null || true
+
+path="$dir/bcat-$$-${RANDOM}.$ext"
 cat - > "$path"
 
 if [ "$(uname -s)" = Darwin ]; then
