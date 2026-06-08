@@ -11,6 +11,7 @@ extend-include = [
     "ips/ips",
     "toks/toks",
     "gemini2md/gemini2md",
+    "commit-survey/commit-survey",
 ]
 
 # `recorder` is a large standalone tool that landed separately and has not had a

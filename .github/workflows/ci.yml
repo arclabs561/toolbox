@@ -15,10 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: shellcheck (bash tools + tests)
-        run: shellcheck -e SC1091 bcat/bcat blinks/blinks tests/*.sh
+        run: shellcheck -e SC1091 bcat/bcat blinks/blinks trunk/trunk tests/*.sh
       - name: bash syntax
         run: |
-          for f in bcat/bcat blinks/blinks tests/*.sh; do bash -n "$f"; done
+          for f in bcat/bcat blinks/blinks trunk/trunk tests/*.sh; do bash -n "$f"; done
       - uses: astral-sh/setup-uv@v8
       - name: ruff check
         run: uvx ruff@0.14.10 check .
