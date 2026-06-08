@@ -16,11 +16,13 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | [bcat](bcat/) | Pipe stdin to a browser, infers filetype |
 | [blinks](blinks/) | Find broken symlinks |
 | [check-math](check-math/) | Verify math rendering in HTML/Markdown |
+| [commit-survey](commit-survey/) | Survey a repo's commit and branch conventions |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
 | [ips](ips/) | Show local and public IP addresses |
 | [recorder](recorder/) | Record + realtime transcribe via parakeet-mlx, with crash-safe FLAC backup. Push-to-talk dictation as a subcommand. |
 | [reflow](reflow/) | Reflow Markdown text preserving code blocks |
 | [toks](toks/) | Count tokens (tiktoken) |
+| [trunk](trunk/) | Print the repo's default branch |
 | [webshot](webshot/) | Screenshot URLs and extract page metadata |
 
 Most tools are [PEP 723](https://peps.python.org/pep-0723/) scripts that run via `uv run --script` -- no install step, dependencies are declared inline.
