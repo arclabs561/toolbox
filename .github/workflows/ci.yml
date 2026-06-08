@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: shellcheck (bash tools + tests)
+        run: shellcheck -e SC1091 bcat/bcat blinks/blinks tests/*.sh
+      - name: bash syntax
+        run: |
+          for f in bcat/bcat blinks/blinks tests/*.sh; do bash -n "$f"; done
+      - uses: astral-sh/setup-uv@v8
+      - name: ruff check
+        run: uvx ruff@0.14.10 check .
+      - name: ruff format
+        run: uvx ruff@0.14.10 format --check .
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+      - name: test suite (core + uv tools; browser tools skipped)
+        run: bash tests/run.sh
+
+  browser:
+    # webshot + check-math, exercised against local fixtures. Heavy deps, so
+    # isolated from lint/test: those gate independently of Playwright/go-grip.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v8
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+      - name: install go-grip
+        run: |
+          go install github.com/chrishrb/go-grip@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      - name: install playwright chromium
+        run: uvx --from playwright playwright install --with-deps chromium
+      - name: browser tests
+        env:
+          TOOLBOX_BROWSER: "1"
+        run: bash tests/test_browser.sh

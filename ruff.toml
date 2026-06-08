@@ -1,0 +1,25 @@
+# Shared ruff config for the toolbox CLI scripts (PEP 723 single-file tools).
+line-length = 100
+
+# The tools are extensionless executables, so ruff's default `*.py` discovery
+# misses them under `ruff check .`. List each Python tool here so a bare
+# `ruff check .` actually lints them. Add new Python tools to this list.
+extend-include = [
+    "reflow/reflow",
+    "webshot/webshot",
+    "check-math/check-math",
+    "ips/ips",
+    "toks/toks",
+    "gemini2md/gemini2md",
+]
+
+# `recorder` is a large standalone tool that landed separately and has not had a
+# dedicated lint/format pass yet. Exclude it from the gate rather than churn it
+# blind; lint it on its own when it gets reviewed.
+extend-exclude = ["recorder"]
+
+[lint]
+# Default ruff rules (pyflakes + a slice of pycodestyle) plus import sorting,
+# pyupgrade, bugbear, and simplify. E501 stays off: these are terminal tools and
+# the occasional long help string / regex reads better unwrapped.
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
