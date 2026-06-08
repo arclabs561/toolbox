@@ -24,3 +24,14 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | [webshot](webshot/) | Screenshot URLs and extract page metadata |
 
 Most tools are [PEP 723](https://peps.python.org/pep-0723/) scripts that run via `uv run --script` -- no install step, dependencies are declared inline.
+
+## Tests
+
+```sh
+tests/run.sh                   # core + uv-backed tools
+TOOLBOX_BROWSER=1 tests/run.sh # also exercise webshot + check-math
+```
+
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs shellcheck, ruff
+(`ruff.toml`), and the test suite on Linux and macOS, plus a browser job for the
+Playwright-backed tools.
