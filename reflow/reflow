@@ -1,119 +1,143 @@
 #!/usr/bin/env python3
+"""Reflow Markdown prose to a target column width.
 
-import sys
-import uuid
+Word-wraps plain paragraphs while leaving structural elements untouched:
+fenced code blocks, headings, list items, blockquotes, tables, thematic
+breaks, indented blocks, and blank lines (paragraph breaks) all pass through
+verbatim. Output goes to stdout.
+
+  reflow doc.md
+  cat doc.md | reflow
+  reflow doc.md --col-width 72
+"""
+
+from __future__ import annotations
+
 import argparse
-import subprocess
+import re
+import sys
+import textwrap
+from pathlib import Path
+
+# A fenced code block opens with three or more backticks or tildes.
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+# Lines that start a structural block. They are emitted verbatim (never
+# wrapped) and they terminate any open prose paragraph.
+_BLOCK_PREFIX = re.compile(
+    r"""^\s*(
+        \#{1,6}\s              # ATX heading: "# ", "## ", ...
+      | >                      # blockquote
+      | [-*+]\s                # bullet list item
+      | \d+[.)]\s              # ordered list item: "1. ", "2) "
+      | \|                     # table row
+      | -{3,}\s*$              # thematic break / setext underline (---)
+      | \*{3,}\s*$             # thematic break (***)
+      | _{3,}\s*$              # thematic break (___)
+      | ={1,}\s*$              # setext heading underline (===)
+      | <                      # raw HTML block
+    )""",
+    re.VERBOSE,
+)
 
 
-def protect_code_blocks_final(content):
-    """Replace code blocks with unique placeholders."""
-    code_blocks = {}
-    modified_lines = []
-    inside_code_block = False
-    current_block = []
-    for line in content.split("\n"):
-        if line.strip().startswith("```"):
-            if inside_code_block:
-                placeholder = f"CODEBLOCK_{uuid.uuid4().hex.upper()}"
-                code_blocks[placeholder] = "\n".join(current_block)
-                modified_lines.append(placeholder)
-                current_block = []
-                inside_code_block = False
-            else:
-                inside_code_block = True
-        elif inside_code_block:
-            current_block.append(line)
-        else:
-            modified_lines.append(line)
-    return "\n".join(modified_lines), code_blocks
+def _is_indented(line: str) -> bool:
+    """A leading tab or 4+ spaces marks indented code / list continuation."""
+    return line.startswith("\t") or line.startswith("    ")
 
 
-def simulate_par_effect_refined(content, col_width=50):
-    """Simulate the 'par' effect while avoiding reflowing inline code snippets."""
-    lines = content.split("\n")
-    reflowed_lines = []
-    current_line = ""
-    inside_inline_code = False
-    for line in lines:
-        if (
-            line.startswith("#")
-            or line.startswith("```")
-            or line.startswith("- ")
-            or line.startswith("CODEBLOCK_")
-        ):
-            if current_line:
-                reflowed_lines.append(current_line)
-                current_line = ""
-            reflowed_lines.append(line)
-        else:
-            words = line.split()
-            for word in words:
-                if "`" in word:
-                    inside_inline_code = not inside_inline_code
-                if len(current_line) + len(word) + 1 <= col_width or inside_inline_code:
-                    current_line += word + " "
-                else:
-                    reflowed_lines.append(current_line.strip())
-                    current_line = word + " "
-    if current_line:
-        reflowed_lines.append(current_line.strip())
-    return "\n".join(reflowed_lines)
+def reflow_markdown(content: str, width: int = 80) -> str:
+    """Reflow prose paragraphs in `content`, preserving block structure."""
+    out: list[str] = []
+    para: list[str] = []
 
-
-def restore_code_blocks_refined(content, code_blocks):
-    """Restore the original code blocks in the content."""
-    for placeholder, block in code_blocks.items():
-        content = content.replace(placeholder, "```\n" + block + "\n```")
-    return content
-
-
-def run_par(content, col_width, par_args):
-    """Run content through 'par' using subprocess."""
-    try:
-        cmd = ["par", f"-w{col_width}"] + par_args
-        result = subprocess.run(
-            cmd, input=content, text=True, capture_output=True, check=True
+    def flush() -> None:
+        if not para:
+            return
+        text = " ".join(line.strip() for line in para)
+        out.append(
+            textwrap.fill(
+                text,
+                width=width,
+                break_long_words=False,  # keep long URLs/identifiers intact
+                break_on_hyphens=False,
+            )
         )
-        return result.stdout
-    except FileNotFoundError:
-        print("warning: 'par' not found, falling back to built-in reflow", file=sys.stderr)
-        return content
+        para.clear()
+
+    lines = content.split("\n")
+    i, n = 0, len(lines)
+
+    # YAML front matter: a leading '---' delimited block. Emit it verbatim so
+    # `key: value` lines aren't reflowed together as prose.
+    if n and lines[0].strip() == "---":
+        j = 1
+        while j < n and lines[j].strip() != "---":
+            j += 1
+        if j < n:  # found the closing '---'
+            out.extend(lines[: j + 1])
+            i = j + 1
+
+    while i < n:
+        line = lines[i]
+
+        fence = _FENCE.match(line)
+        if fence:
+            # Emit the whole fenced block verbatim, including the closing fence.
+            # CommonMark: the closer is a line of only the same fence char, at
+            # least as long as the opener (so a ```` block can hold ``` lines).
+            flush()
+            run = fence.group(1)
+            fence_char, fence_len = run[0], len(run)
+            out.append(line)
+            i += 1
+            while i < n:
+                out.append(lines[i])
+                s = lines[i].strip()
+                closed = bool(s) and set(s) == {fence_char} and len(s) >= fence_len
+                i += 1
+                if closed:
+                    break
+            continue
+
+        if not line.strip():
+            flush()
+            # collapse runs of blank lines into a single paragraph separator
+            if out and out[-1] != "":
+                out.append("")
+            i += 1
+            continue
+
+        if _is_indented(line) or _BLOCK_PREFIX.match(line):
+            flush()
+            out.append(line)
+            i += 1
+            continue
+
+        para.append(line)
+        i += 1
+
+    flush()
+    while out and out[-1] == "":
+        out.pop()
+    return "\n".join(out) + "\n" if out else ""
 
 
-def process_markdown_content(content, col_width=80):
-    """Process the markdown content to reflow text while preserving code blocks."""
-    protected_content, code_blocks = protect_code_blocks_final(content)
-    reflowed_protected_content = simulate_par_effect_refined(
-        protected_content, col_width=col_width
-    )
-    final_content = restore_code_blocks_refined(reflowed_protected_content, code_blocks)
-    return final_content
-
-
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Process markdown content to reflow text while preserving code blocks.",
+        description="Reflow Markdown prose to a target column width, "
+        "preserving code blocks and structure.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--col-width", type=int, default=80, help="Column width for reflowing text."
-    )
-    parser.add_argument(
-        "--par-mode", action="store_true", help="Use 'par' for text reflowing."
-    )
-    parser.add_argument(
-        "par-args",
-        nargs="*",
-        help="Arguments to pass to 'par' if --par-mode is enabled.",
-    )
+    parser.add_argument("file", nargs="?", help="Markdown file (default: stdin)")
+    parser.add_argument("-w", "--col-width", type=int, default=80, help="Target column width.")
     args = parser.parse_args()
-    content = sys.stdin.read()
-    if args.par_mode:
-        processed_content = run_par(content, args.col_width, args.par_args)
-    else:
-        processed_content = process_markdown_content(content, args.col_width)
-    print(processed_content)
+
+    if args.col_width < 1:
+        parser.error("--col-width must be a positive integer")
+
+    content = Path(args.file).read_text() if args.file else sys.stdin.read()
+    sys.stdout.write(reflow_markdown(content, args.col_width))
 
 
 if __name__ == "__main__":
