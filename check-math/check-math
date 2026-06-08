@@ -18,6 +18,7 @@ Usage:
   check-math document.md -s out.png
   check-math **/*.md
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,9 @@ def _find_go_grip() -> str:
     path = shutil.which("go-grip")
     if path:
         return path
-    print("go-grip not found. Install: go install github.com/chrishrb/go-grip@latest", file=sys.stderr)
+    print(
+        "go-grip not found. Install: go install github.com/chrishrb/go-grip@latest", file=sys.stderr
+    )
     sys.exit(1)
 
 
@@ -71,12 +74,12 @@ def _extract_math_spans(text: str, inline_only: bool = False) -> list[tuple[str,
     spans = []
     if not inline_only:
         # display math $$...$$
-        for m in re.finditer(r'\$\$(.+?)\$\$', text, re.DOTALL):
-            line = text[:m.start()].count('\n') + 1
+        for m in re.finditer(r"\$\$(.+?)\$\$", text, re.DOTALL):
+            line = text[: m.start()].count("\n") + 1
             spans.append((m.group(1), line))
     # inline math $...$  (not preceded/followed by $)
-    for m in re.finditer(r'(?<!\$)\$(?!\$)([^$\n]{2,200})\$(?!\$)', text):
-        line = text[:m.start()].count('\n') + 1
+    for m in re.finditer(r"(?<!\$)\$(?!\$)([^$\n]{2,200})\$(?!\$)", text):
+        line = text[: m.start()].count("\n") + 1
         spans.append((m.group(1), line))
     return spans
 
@@ -104,7 +107,7 @@ def _check_source_github_compat(file_path: str) -> list[str]:
     inline_spans = _extract_math_spans(text, inline_only=True)
     for content, line in inline_spans:
         # match unescaped underscores only (\_  is safe in Markdown)
-        emphasis = re.findall(r'(?<!\\)_([^\s_]{1,30})(?<!\\)_', content)
+        emphasis = re.findall(r"(?<!\\)_([^\s_]{1,30})(?<!\\)_", content)
         if emphasis:
             issues.append(
                 f"L{line}: underscore pattern may form Markdown emphasis "
@@ -113,26 +116,25 @@ def _check_source_github_compat(file_path: str) -> list[str]:
             )
 
     # 3. Display math $$ without blank line before/after
-    lines = text.split('\n')
+    lines = text.split("\n")
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith('$$') and not stripped == '$$':
+        if stripped.startswith("$$") and stripped != "$$":
             # single-line display math like $$x + y$$ -- ok
             continue
-        if stripped == '$$':
-            # opening $$ needs blank line before, closing $$ needs blank after
-            if i > 0 and lines[i - 1].strip():
-                # check if this is closing (search back for opening)
-                prev_dd = any(lines[j].strip() == '$$' for j in range(max(0, i - 20), i))
-                if not prev_dd:
-                    issues.append(
-                        f"L{i+1}: display math $$ without blank line before "
-                        f"(GitHub requires blank lines around $$)"
-                    )
+        # opening $$ needs a blank line before, closing $$ needs one after
+        if stripped == "$$" and i > 0 and lines[i - 1].strip():
+            # check if this is closing (search back for opening)
+            prev_dd = any(lines[j].strip() == "$$" for j in range(max(0, i - 20), i))
+            if not prev_dd:
+                issues.append(
+                    f"L{i + 1}: display math $$ without blank line before "
+                    f"(GitHub requires blank lines around $$)"
+                )
 
     # 4. align environment (use aligned instead)
     for content, line in math_spans:
-        if re.search(r'\\begin\{align\*?\}', content):
+        if re.search(r"\\begin\{align\*?\}", content):
             issues.append(
                 f"L{line}: \\begin{{align}} may fail on GitHub. "
                 f"Use \\begin{{aligned}} inside $$ instead."
@@ -140,7 +142,7 @@ def _check_source_github_compat(file_path: str) -> list[str]:
 
     # 5. Percent sign in math (breaks rendering)
     for content, line in math_spans:
-        if '%' in content and '\\%' not in content:
+        if "%" in content and "\\%" not in content:
             issues.append(
                 f"L{line}: bare % in math mode breaks GitHub rendering. "
                 f"Use \\% for literal percent."
@@ -163,7 +165,7 @@ def _check_unrendered_math(page) -> list[str]:
     issues = []
 
     # unrendered display math
-    raw_display = re.findall(r'^\$\$', visible_text, re.MULTILINE)
+    raw_display = re.findall(r"^\$\$", visible_text, re.MULTILINE)
     if raw_display:
         issues.append(f"{len(raw_display)} unrendered display math delimiter(s) ($$)")
 
@@ -171,8 +173,10 @@ def _check_unrendered_math(page) -> list[str]:
     # MathJax accessibility text can expose \tau, \mathbb etc. in innerText even
     # when rendered. Only flag expressions that look like full unrendered LaTeX
     # (contain both a command AND structural syntax like braces or subscript).
-    raw_inline = re.findall(r'(?<!\$)\$(?!\$)([^$\n]{2,80})\$(?!\$)', visible_text)
-    math_patterns = [m for m in raw_inline if re.search(r'\\[a-zA-Z]', m) and re.search(r'[{}_^]', m)]
+    raw_inline = re.findall(r"(?<!\$)\$(?!\$)([^$\n]{2,80})\$(?!\$)", visible_text)
+    math_patterns = [
+        m for m in raw_inline if re.search(r"\\[a-zA-Z]", m) and re.search(r"[{}_^]", m)
+    ]
     if math_patterns:
         issues.append(
             f"{len(math_patterns)} likely unrendered inline math expression(s): "
@@ -208,7 +212,8 @@ def check(file_path: str, screenshot: str | None = None, port: int = 16419) -> l
     # URL is http://localhost:PORT/<filename>
     proc = subprocess.Popen(
         [grip, str(p), "-b=false", f"-p={port}"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
     url = f"http://localhost:{port}/{p.name}"
@@ -217,7 +222,8 @@ def check(file_path: str, screenshot: str | None = None, port: int = 16419) -> l
         for _ in range(30):
             result = subprocess.run(
                 ["curl", "-sf", "-o", "/dev/null", url],
-                capture_output=True, timeout=2,
+                capture_output=True,
+                timeout=2,
             )
             if result.returncode == 0:
                 break
@@ -231,7 +237,9 @@ def check(file_path: str, screenshot: str | None = None, port: int = 16419) -> l
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             page = browser.new_page(viewport={"width": 1280, "height": 900})
-            page.goto(url, wait_until="networkidle")
+            # go-grip serves static local HTML, so 'load' is sufficient and
+            # bounded; MathJax readiness is awaited explicitly below.
+            page.goto(url, wait_until="load", timeout=15000)
 
             # wait for MathJax to finish rendering
             try:
@@ -288,7 +296,7 @@ def main() -> None:
                 print(f"    {j}. {issue}")
             all_ok = False
         else:
-            print(f"  PASSED")
+            print("  PASSED")
 
     sys.exit(0 if all_ok else 1)
 
