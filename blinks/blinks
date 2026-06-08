@@ -12,19 +12,31 @@ if [ "${1:-}" = "-a" ]; then
   depth_args=()
 fi
 
+# Collect candidate symlinks into a temp file rather than reading straight from
+# a process substitution: some `find` implementations (notably bfs) flush their
+# output after the reader has already hit EOF, so `< <(find ...)` silently reads
+# nothing. A regular file has no such race.
+#
+# Match `-type l` (portable; BSD find has no GNU `-xtype`) and let `[ -e ]`,
+# which follows the link, decide whether the target is actually missing.
+links=$(mktemp)
+trap 'rm -f "$links"' EXIT
+find . "${depth_args[@]}" -type l -print0 2>/dev/null > "$links" || true
+
 found=0
 while IFS= read -r -d '' fn; do
-  if ! [ -e "$fn" ]; then
-    target=$(readlink "$fn" 2>/dev/null || echo "?")
-    if [ "$(uname -s)" = Darwin ]; then
-      mtime=$(stat -f '%Sm' -t '%Y-%m-%d' "$fn" 2>/dev/null || echo "?")
-    else
-      mtime=$(stat -c '%y' "$fn" 2>/dev/null | cut -d' ' -f1 || echo "?")
-    fi
-    printf "%-50s -> %-30s  %s\n" "$fn" "$target" "$mtime"
-    found=$((found + 1))
+  if [ -e "$fn" ]; then
+    continue # target exists -> not broken
   fi
-done < <(find . "${depth_args[@]}" -xtype l -print0 2>/dev/null)
+  target=$(readlink "$fn" 2>/dev/null || echo "?")
+  if [ "$(uname -s)" = Darwin ]; then
+    mtime=$(stat -f '%Sm' -t '%Y-%m-%d' "$fn" 2>/dev/null || echo "?")
+  else
+    mtime=$(stat -c '%y' "$fn" 2>/dev/null | cut -d' ' -f1 || echo "?")
+  fi
+  printf "%-50s -> %-30s  %s\n" "$fn" "$target" "$mtime"
+  found=$((found + 1))
+done < "$links"
 
 if [ "$found" -eq 0 ]; then
   echo "no broken symlinks found"
