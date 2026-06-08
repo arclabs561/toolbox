@@ -11,9 +11,11 @@ Usage:
     gemini2md saved.html             # file arg
     gemini2md saved.html -o out.md   # file to file
 """
-import sys
+
 import re
+import sys
 from pathlib import Path
+
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 
@@ -75,8 +77,15 @@ def _walk(el, parts: list, depth: int):
 
         if "cdk-visually-hidden" in child.get("class", []):
             continue
-        if tag in ("mat-icon", "button", "copy-button", "message-actions",
-                   "style", "script", "bard-avatar"):
+        if tag in (
+            "mat-icon",
+            "button",
+            "copy-button",
+            "message-actions",
+            "style",
+            "script",
+            "bard-avatar",
+        ):
             continue
 
         if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
@@ -111,7 +120,7 @@ def _walk(el, parts: list, depth: int):
                 lang = ""
                 for cls in code_el.get("class", []):
                     if cls.startswith("language-"):
-                        lang = cls[len("language-"):]
+                        lang = cls[len("language-") :]
                         break
                 parts.append(f"\n\n```{lang}\n")
                 parts.append(code_el.get_text())
@@ -217,10 +226,7 @@ def main():
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
     args = parser.parse_args()
 
-    if args.input:
-        html = Path(args.input).read_text()
-    else:
-        html = sys.stdin.read()
+    html = Path(args.input).read_text() if args.input else sys.stdin.read()
 
     if not html.strip():
         print("Error: empty input", file=sys.stderr)
