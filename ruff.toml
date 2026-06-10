@@ -5,13 +5,14 @@ line-length = 100
 # misses them under `ruff check .`. List each Python tool here so a bare
 # `ruff check .` actually lints them. Add new Python tools to this list.
 extend-include = [
-    "reflow/reflow",
-    "webshot/webshot",
-    "check-math/check-math",
-    "ips/ips",
-    "toks/toks",
-    "gemini2md/gemini2md",
-    "commit-survey/commit-survey",
+  "reflow/reflow",
+  "webshot/webshot",
+  "check-math/check-math",
+  "ips/ips",
+  "toks/toks",
+  "gemini2md/gemini2md",
+  "claude2md/claude2md",
+  "commit-survey/commit-survey",
 ]
 
 # `recorder` is a large standalone tool that landed separately and has not had a

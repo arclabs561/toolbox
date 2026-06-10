@@ -1,0 +1,47 @@
+<!-- Minimal claude.ai DOM skeleton, structure copied from a real 2026-06 capture
+     (build a3e50950c7), content replaced with innocuous test text. -->
+<html data-theme="claude" lang="en-US">
+<head><title>Test conversation - Claude</title></head>
+<body>
+<nav aria-label="Sidebar">
+  <a href="/chat/00000000-0000-0000-0000-000000000000">
+    <span class="sr-only">Sidebar chat title to ignore</span>
+    <span aria-hidden="true">Sidebar chat title to ignore</span>
+  </a>
+</nav>
+<div id="main-content">
+  <div class="mb-1 mt-6 group">
+    <h2 class="sr-only select-none">You said: What is 2+2?</h2>
+    <div data-user-message-bubble="true">
+      <div data-testid="user-message" class="font-large !font-user-message py-0.5">
+        <p class="whitespace-pre-wrap break-words">What is 2+2?
+and why?</p>
+      </div>
+    </div>
+    <div role="group" aria-label="Message actions">
+      <span class="text-text-500 text-xs">12:04 PM</span>
+      <button type="button" aria-label="Retry"><span>Retry</span></button>
+    </div>
+  </div>
+  <div data-is-streaming="false" class="group relative pb-3">
+    <h2 class="sr-only select-none">Claude responded: The answer is 4.</h2>
+    <div class="font-claude-response relative leading-[1.65rem]">
+      <button class="group/status" aria-expanded="false"><span>Pondered arithmetic briefly</span></button>
+      <span class="sr-only" role="status" aria-live="polite">Pondered arithmetic briefly</span>
+      <div class="standard-markdown grid-cols-1 grid">
+        <p class="font-claude-response-body break-words whitespace-normal">The answer is <strong>4</strong>, by <em>counting</em>. <span class="inline-flex"><a href="https://example.com/proof" target="_blank"><span><span>Example</span></span><svg viewBox="0 0 256 256"><path d="M0"></path></svg></a></span></p>
+        <p class="font-claude-response-body break-words whitespace-normal">Reasons:</p>
+        <ul>
+          <li>simple arithmetic</li>
+          <li>axioms of <code>Peano</code></li>
+        </ul>
+        <pre><div><code class="language-python">print(2 + 2)</code></div></pre>
+      </div>
+    </div>
+    <div role="group" aria-label="Message actions">
+      <button type="button" aria-label="Copy"><span>Copy</span></button>
+    </div>
+  </div>
+</div>
+</body>
+</html>
