@@ -155,7 +155,7 @@ def _walk(el, parts: list, depth: int):
 
         elif tag == "a":
             href = child.get("href", "")
-            text_content = child.get_text()
+            text_content = child.get_text(strip=True)
             if href and text_content:
                 parts.append(f"[{text_content}]({href})")
             else:
