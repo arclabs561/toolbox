@@ -82,6 +82,20 @@ def _walk(el, parts: list, depth: int):
         if child.get("aria-hidden") == "true" and tag == "span" and not child.get_text(strip=True):
             continue
 
+        # KaTeX math: emit only the TeX annotation, dropping the rendered-glyph
+        # and visual-layout layers (both carry text that would otherwise leak).
+        # display blocks ($$) checked before inline ($) since display wraps .katex.
+        if tag == "span" and "katex-display" in classes:
+            tex = _katex_tex(child)
+            if tex:
+                parts.append(f"\n\n$$\n{tex}\n$$\n\n")
+            continue
+        if tag == "span" and "katex" in classes:
+            tex = _katex_tex(child)
+            if tex:
+                parts.append(f"${tex}$")
+            continue
+
         if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             level = int(tag[1])
             parts.append(f"\n\n{'#' * level} ")
@@ -174,6 +188,12 @@ def _walk(el, parts: list, depth: int):
 
         else:
             _walk(child, parts, depth)
+
+
+def _katex_tex(el: Tag) -> str:
+    """Pull the clean TeX source out of a KaTeX span's MathML annotation."""
+    ann = el.select_one('annotation[encoding="application/x-tex"]')
+    return ann.get_text().strip() if ann else ""
 
 
 def _convert_table(table: Tag, parts: list):
