@@ -3016,6 +3016,33 @@ def _dictate_trigger(rest: list[str]) -> int:
         return 2
 
 
+def _emphasis_tag(samples, hist: list) -> str:
+    """Energy-based emphasis tag for one dictation utterance, calibrated to a
+    per-session running baseline (so it survives mic/level differences).
+
+    Returns "[emphatic] " when this utterance's RMS energy is well above the
+    recent baseline (z > 0.8), else "". Grounded in ~/Documents/dev/prosody:
+    RMS energy separates high vs low vocal arousal on RAVDESS (AUC ~0.89), and
+    a cross-model A/B shows arousal tags shift LLM responses modestly above a
+    noise floor (high run-to-run variance). Experimental; opt-in via --prosody.
+
+    `hist` is the session's running window of recent RMS values, mutated here.
+    """
+    import statistics
+    if samples.size < SAMPLE_RATE // 2:  # under ~0.5s: too short to judge
+        return ""
+    rms = float(np.sqrt(np.mean(samples.astype(np.float64) ** 2)))
+    tag = ""
+    if len(hist) >= 3:
+        mu = statistics.fmean(hist)
+        sd = statistics.pstdev(hist) or 1e-9
+        if (rms - mu) / sd > 0.8:
+            tag = "[emphatic] "
+    hist.append(rms)
+    del hist[:-20]  # keep the last 20 utterances as the baseline
+    return tag
+
+
 def _dictate_daemon(args) -> int:
     """Run as a long-running daemon. Loads parakeet once, then services
     `toggle` and `toggle:paste` commands over a unix socket. Each toggle
@@ -3058,6 +3085,7 @@ def _dictate_daemon(args) -> int:
         "stop_event": None,
         "drain_thread": None,
         "started_at": 0.0,
+        "energy_hist": [],     # running RMS baseline for --prosody emphasis tag
     }
 
     def start_recording() -> str:
@@ -3149,6 +3177,11 @@ def _dictate_daemon(args) -> int:
                         text = polished
             except Exception:
                 pass
+
+        # Prosody (opt-in): prepend an emphasis tag AFTER polish, so the polish
+        # model can't strip it. Tags-only: the lexical transcript is untouched.
+        if getattr(args, "prosody", False):
+            text = _emphasis_tag(samples, state["energy_hist"]) + text
 
         if not args.no_clipboard:
             try:
@@ -3281,6 +3314,10 @@ def cmd_dictate(rest: list[str]) -> int:
                    default=os.environ.get("MEETING_POLISH_MODEL", "gemma4:e2b"))
     p.add_argument("--save", action="store_true",
                    help="save the audio + transcript to ~/recordings/dict-<ts>")
+    p.add_argument("--prosody", action="store_true",
+                   help="EXPERIMENTAL: prefix [emphatic] when an utterance's vocal "
+                        "energy is well above the session baseline (see "
+                        "~/Documents/dev/prosody)")
     p.add_argument("--daemon", action="store_true",
                    help="run as a long-running daemon listening on a unix socket; "
                         "trigger record cycles via `recorder dictate trigger`")
