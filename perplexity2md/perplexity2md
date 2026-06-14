@@ -1,0 +1,304 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["beautifulsoup4"]
+# ///
+"""Convert Perplexity conversation HTML (rendered DOM from clipboard) to Markdown.
+
+Sibling of claude2md and gemini2md, same walker shape, different turn selectors:
+user turns live in div.group/query, assistant turns in div.prose. Each query is
+followed by one or more prose segments (inline status steps plus the final
+answer); consecutive assistant segments are merged into one turn. Prose nested
+inside a div.group/subagent panel is internal delegation plumbing and is dropped.
+Inline citation chips (span.citation) that wrap a real source URL become markdown
+links; collapsed "+N more sources" chips carry no recoverable URL and are dropped
+rather than leaked as glued label text. KaTeX math emits its TeX annotation.
+
+Usage:
+    pbpaste | perplexity2md              # clipboard to stdout
+    pbpaste | perplexity2md -o convo.md  # clipboard to file
+    perplexity2md saved.html             # file arg
+    perplexity2md saved.html -o out.md   # file to file
+"""
+
+import re
+import sys
+from pathlib import Path
+
+from bs4 import BeautifulSoup, NavigableString, Tag
+
+
+def extract_turns(soup: BeautifulSoup) -> list[dict]:
+    """Walk the document and yield (role, content) pairs in order."""
+    raw: list[tuple[str, str]] = []
+
+    for el in soup.descendants:
+        if not isinstance(el, Tag):
+            continue
+
+        classes = el.get("class", [])
+
+        if "group/query" in classes:
+            md = _html_to_markdown(el)
+            if md.strip():
+                raw.append(("user", md.strip()))
+
+        elif "prose" in classes:
+            # Drop internal subagent delegation panels (collapsible plumbing).
+            if el.find_parent(class_="group/subagent"):
+                continue
+            md = _html_to_markdown(el)
+            if md.strip():
+                raw.append(("assistant", md.strip()))
+
+    # Merge consecutive assistant segments (status steps + final answer) into
+    # a single turn so each Perplexity answer reads as one block.
+    turns: list[dict] = []
+    for role, md in raw:
+        if turns and turns[-1]["role"] == "assistant" and role == "assistant":
+            turns[-1]["content"] += "\n\n" + md
+        else:
+            turns.append({"role": role, "content": md})
+
+    return turns
+
+
+def _html_to_markdown(el: Tag) -> str:
+    parts = []
+    _walk(el, parts, depth=0)
+    text = "".join(parts)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _walk(el, parts: list, depth: int):
+    for child in el.children:
+        if isinstance(child, NavigableString):
+            text = str(child)
+            if text.startswith("<!--"):
+                continue
+            parts.append(text)
+            continue
+
+        if not isinstance(child, Tag):
+            continue
+
+        tag = child.name
+        classes = child.get("class", [])
+
+        if "sr-only" in classes:
+            continue
+        if tag in ("button", "svg", "style", "script", "iframe"):
+            continue
+        if child.get("role") == "status":
+            continue
+        if child.get("aria-hidden") == "true" and tag == "span" and not child.get_text(strip=True):
+            continue
+
+        # Citation chips: span.citation wraps either a real source link or a
+        # collapsed "+N more sources" badge. Keep the linked form as an inline
+        # markdown link; drop the bare-label form (its URLs live in a popover
+        # that isn't in the static DOM, so the visible label would otherwise
+        # glue onto the preceding word as noise).
+        if tag == "span" and "citation" in classes:
+            a = child.select_one("a[href]")
+            if a is not None:
+                href = a.get("href", "")
+                label = a.get_text(strip=True)
+                if href and label:
+                    parts.append(f"[{label}]({href})")
+            continue
+
+        # KaTeX math: emit only the TeX annotation, dropping the rendered-glyph
+        # and visual-layout layers (both carry text that would otherwise leak).
+        # display blocks ($$) checked before inline ($) since display wraps .katex.
+        if tag == "span" and "katex-display" in classes:
+            tex = _katex_tex(child)
+            if tex:
+                parts.append(f"\n\n$$\n{tex}\n$$\n\n")
+            continue
+        if tag == "span" and "katex" in classes:
+            tex = _katex_tex(child)
+            if tex:
+                parts.append(f"${tex}$")
+            continue
+
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            level = int(tag[1])
+            parts.append(f"\n\n{'#' * level} ")
+            _walk(child, parts, depth)
+            parts.append("\n\n")
+
+        elif tag == "p":
+            parts.append("\n\n")
+            _walk(child, parts, depth)
+            parts.append("\n\n")
+
+        elif tag in ("strong", "b"):
+            parts.append("**")
+            _walk(child, parts, depth)
+            parts.append("**")
+
+        elif tag in ("em", "i"):
+            parts.append("*")
+            _walk(child, parts, depth)
+            parts.append("*")
+
+        elif tag == "code" and (not child.parent or child.parent.name != "pre"):
+            parts.append("`")
+            parts.append(child.get_text())
+            parts.append("`")
+
+        elif tag == "pre":
+            code_el = child.select_one("code")
+            if code_el:
+                lang = ""
+                for cls in code_el.get("class", []):
+                    if cls.startswith("language-"):
+                        lang = cls[len("language-") :]
+                        break
+                parts.append(f"\n\n```{lang}\n")
+                parts.append(code_el.get_text())
+                parts.append("\n```\n\n")
+            else:
+                parts.append("\n\n```\n")
+                parts.append(child.get_text())
+                parts.append("\n```\n\n")
+
+        elif tag == "ul":
+            parts.append("\n")
+            _walk(child, parts, depth + 1)
+            parts.append("\n")
+
+        elif tag == "ol":
+            parts.append("\n")
+            counter = {"n": 1}
+            for li in child.children:
+                if isinstance(li, Tag) and li.name == "li":
+                    indent = "  " * depth
+                    parts.append(f"{indent}{counter['n']}. ")
+                    _walk(li, parts, depth + 1)
+                    parts.append("\n")
+                    counter["n"] += 1
+            parts.append("\n")
+
+        elif tag == "li" and child.parent and child.parent.name == "ul":
+            indent = "  " * (depth - 1)
+            parts.append(f"{indent}- ")
+            _walk(child, parts, depth)
+            parts.append("\n")
+
+        elif tag == "a":
+            href = child.get("href", "")
+            text_content = child.get_text(strip=True)
+            if href and text_content:
+                parts.append(f"[{text_content}]({href})")
+            else:
+                _walk(child, parts, depth)
+
+        elif tag == "br":
+            parts.append("\n")
+
+        elif tag == "table":
+            _convert_table(child, parts)
+
+        elif tag == "blockquote":
+            bq_parts: list[str] = []
+            _walk(child, bq_parts, depth)
+            bq_text = "".join(bq_parts).strip()
+            for line in bq_text.split("\n"):
+                parts.append(f"> {line}\n")
+            parts.append("\n")
+
+        elif tag == "hr":
+            parts.append("\n\n---\n\n")
+
+        else:
+            _walk(child, parts, depth)
+
+
+def _katex_tex(el: Tag) -> str:
+    """Pull the clean TeX source out of a KaTeX span's MathML annotation."""
+    ann = el.select_one('annotation[encoding="application/x-tex"]')
+    return ann.get_text().strip() if ann else ""
+
+
+def _cell_text(td: Tag) -> str:
+    """Cell text with citation chips stripped so they don't glue onto content."""
+    chunks = []
+    for node in td.descendants:
+        if isinstance(node, NavigableString):
+            if node.find_parent("span", class_="citation"):
+                continue
+            chunks.append(str(node))
+    return re.sub(r"\s+", " ", "".join(chunks)).strip()
+
+
+def _convert_table(table: Tag, parts: list):
+    rows = []
+    for tr in table.select("tr"):
+        cells = []
+        for td in tr.select("th, td"):
+            cells.append(_cell_text(td))
+        if cells:
+            rows.append(cells)
+
+    if not rows:
+        return
+
+    ncols = max(len(r) for r in rows)
+    for r in rows:
+        while len(r) < ncols:
+            r.append("")
+
+    parts.append("\n\n")
+    parts.append("| " + " | ".join(rows[0]) + " |\n")
+    parts.append("| " + " | ".join("---" for _ in rows[0]) + " |\n")
+    for row in rows[1:]:
+        parts.append("| " + " | ".join(row) + " |\n")
+    parts.append("\n")
+
+
+def turns_to_markdown(turns: list[dict]) -> str:
+    parts = []
+    for turn in turns:
+        if turn["role"] == "user":
+            parts.append(f"## User\n\n{turn['content']}\n\n")
+        else:
+            parts.append(f"## Perplexity\n\n{turn['content']}\n\n")
+
+    return "".join(parts).strip() + "\n"
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Convert Perplexity HTML to Markdown")
+    parser.add_argument("input", nargs="?", help="Input HTML file (default: stdin)")
+    parser.add_argument("-o", "--output", help="Output file (default: stdout)")
+    args = parser.parse_args()
+
+    html = Path(args.input).read_text() if args.input else sys.stdin.read()
+
+    if not html.strip():
+        print("Error: empty input", file=sys.stderr)
+        sys.exit(1)
+
+    soup = BeautifulSoup(html, "html.parser")
+    turns = extract_turns(soup)
+
+    if not turns:
+        print("Error: no conversation turns found", file=sys.stderr)
+        sys.exit(1)
+
+    md = turns_to_markdown(turns)
+
+    if args.output:
+        Path(args.output).write_text(md)
+        print(f"Wrote {len(turns)} turns to {args.output}", file=sys.stderr)
+    else:
+        print(md)
+
+
+if __name__ == "__main__":
+    main()
