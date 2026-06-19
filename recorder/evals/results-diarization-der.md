@@ -25,6 +25,34 @@ step is to sweep threshold (and num_clusters / min_duration knobs) against DER
 on this corpus and keep whatever lowers DER, not whatever lands the count
 near 4.
 
+## Threshold sweep: tuning does NOT fix it
+
+| threshold | detected speakers | DER |
+|---|---|---|
+| 0.65 (default) | 19 | 70.0% |
+| 0.75 | 14 | 68.6% |
+| 0.85 | 8 | 68.5% |
+| 0.90 | 7 | 67.5% |
+
+Driving the cluster count from 19 down to 7 (nearly the true 4) moves DER by
+only 2.5 points. The DER curve is flat-and-catastrophic across thresholds, so
+over-clustering is a symptom, not the disease.
+
+Timeline sanity-check (IS1009a) confirms the failure is speaker *confusion*,
+not missed/false-alarm speech: hypothesis and reference share the same
+max_end (805.7s) and similar total speech (hyp 693.5s vs ref 722.4s), and the
+reference has almost no overlap (0.90 speech/wall ratio). So the diarizer
+places speech in roughly the right time slots but assigns the wrong speaker
+identity. The 3D-Speaker CAMPPlus embeddings do not separate these 4 AMI
+speakers on 16kHz mixed-headset audio, which no clustering threshold can
+recover.
+
+Conclusion: diarization quality on meeting audio is a model/embedding problem,
+not a tuning problem. Threshold tuning is off the table. Real options are a
+different embedding model, a different diarizer (e.g. pyannote.audio end-to-end
+rather than sherpa-onnx's segment-then-cluster), or accepting that speaker
+labels are unreliable and presenting them with a caveat.
+
 ## How to reproduce
 
 ```sh
