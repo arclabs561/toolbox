@@ -38,6 +38,8 @@ One-time, after `brew install --cask blackhole-2ch`:
 
 At startup, `recorder` opportunistically checks for a BlackHole-containing aggregate device and prefers it when no `--device` flag is passed. Fall back to mic-only when no aggregate is configured.
 
+Note that the default `:0` is a positional avfoundation index, not a stable alias for your microphone. avfoundation orders devices arbitrarily, so on a machine with BlackHole installed `:0` may resolve to `BlackHole 2ch` rather than the mic. A bare BlackHole device with nothing routed into it captures pure silence. Run `recorder --list-devices` to see which index is your mic and pass it with `--device`, or set `MEETING_DEVICE` (see below). When frames arrive but stay silent (peak below -80 dB) for 8 seconds, the recorder warns on the terminal and the live page rather than recording silence quietly.
+
 ## Quick start: meeting recording
 
 ```sh

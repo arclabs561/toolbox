@@ -68,6 +68,8 @@ CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_SECONDS)
 CHUNK_BYTES = CHUNK_SAMPLES * 4  # float32
 TIMESTAMP_INTERVAL = 5 * 60       # write a `[mm:ss]` marker every 5min of audio
 FIRST_AUDIO_DEADLINE = 5.0        # seconds before warning about silent input
+SILENCE_DB_FLOOR = -80.0          # per-chunk peak below this counts as silent
+SILENCE_WARN_AFTER = 8.0          # seconds of sustained silence before warning
 
 
 # ---------- audio device helpers ----------
@@ -3929,6 +3931,8 @@ def main() -> int:
     last_status = 0.0
     next_marker = TIMESTAMP_INTERVAL
     first_audio_warned = False
+    silence_warned = False
+    sound_seen_at = start  # wall-clock of the last above-floor chunk
 
     try:
         # Streaming knobs (parakeet-mlx). Empirical sweep on the 2-min
@@ -3985,6 +3989,9 @@ def main() -> int:
                     )
                 else:
                     chunk_peak_db = -120.0
+
+                if chunk_peak_db > SILENCE_DB_FLOOR:
+                    sound_seen_at = time.time()
 
                 tx.add_audio(mx.array(samples_np))
 
@@ -4049,6 +4056,22 @@ def main() -> int:
                     sys.stderr.write("\nwarning: " + msg + "\n")
                     state.set_status("recording", warning=msg)
                     first_audio_warned = True
+
+                # warn on silent capture: frames are arriving but every chunk
+                # is below the dB floor. The usual cause is a loopback device
+                # (e.g. BlackHole) selected with nothing routed into it, which
+                # the no-audio check above misses because frames DO arrive.
+                if (not silence_warned and not args.from_file
+                        and total_samples > 0
+                        and (now - sound_seen_at) > SILENCE_WARN_AFTER):
+                    msg = (f"silence on {dev_label} for "
+                           f"{SILENCE_WARN_AFTER:.0f}s (peak < "
+                           f"{SILENCE_DB_FLOOR:.0f} dB). if this is a loopback "
+                           f"device, route audio into it; otherwise pick your "
+                           f"mic with --device (see --list-devices).")
+                    sys.stderr.write("\nwarning: " + msg + "\n")
+                    state.set_status("recording", warning=msg)
+                    silence_warned = True
 
                 if now - last_status > 0.5:
                     tail_disp = tx.result.text[-100:].replace("\n", " ")
