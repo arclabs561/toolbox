@@ -36,9 +36,9 @@ One-time, after `brew install --cask blackhole-2ch`:
 5. Run `recorder --list-devices` to find the aggregate device's index (e.g. `:2`).
 6. Pass that index: `recorder --device ":2" team-sync`.
 
-At startup, `recorder` opportunistically checks for a BlackHole-containing aggregate device and prefers it when no `--device` flag is passed. Fall back to mic-only when no aggregate is configured.
+At startup, when no `--device` flag is passed (and `MEETING_DEVICE` is unset), `recorder` resolves the device by name: a BlackHole-containing aggregate device if one exists (the meeting-capture path), else the first input that looks like a real microphone. This is deliberate, because avfoundation indices are positional and unstable. A hardcoded `:0` orders devices arbitrarily, so on a machine with BlackHole installed `:0` can resolve to `BlackHole 2ch` (a silent loopback) rather than the mic, recording pure silence. Name resolution survives device reordering. Pass `--device` or set `MEETING_DEVICE` to override; run `recorder --list-devices` to see the indices.
 
-Note that the default `:0` is a positional avfoundation index, not a stable alias for your microphone. avfoundation orders devices arbitrarily, so on a machine with BlackHole installed `:0` may resolve to `BlackHole 2ch` rather than the mic. A bare BlackHole device with nothing routed into it captures pure silence. Run `recorder --list-devices` to see which index is your mic and pass it with `--device`, or set `MEETING_DEVICE` (see below). When frames arrive but stay silent (peak below -80 dB) for 8 seconds, the recorder warns on the terminal and the live page rather than recording silence quietly.
+As a backstop, when frames arrive but stay silent (peak below -80 dB) for 8 seconds, the recorder warns on the terminal and the live page rather than recording silence quietly. This catches a muted mic or an unplugged interface mid-recording, not just a misconfigured device.
 
 ## Quick start: meeting recording
 
@@ -148,7 +148,7 @@ The `.md` files are written atomically; reference any of them mid-meeting or aft
 | Var | Default | Notes |
 |---|---|---|
 | `MEETING_DIR` | `~/recordings` | Output directory |
-| `MEETING_DEVICE` | `:0` | avfoundation audio device |
+| `MEETING_DEVICE` | auto | avfoundation audio device; unset = resolve mic/aggregate by name |
 | `MEETING_PORT` | `0` | HTTP port (0 = ephemeral) |
 | `PARAKEET_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | parakeet-mlx HF repo |
 | `MEETING_POLISH_MODEL` | `gemma4:e2b` | streaming polish model |

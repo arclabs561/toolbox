@@ -108,18 +108,21 @@ def device_label(device: str) -> str:
 
 
 def auto_detect_device(user_device: str, env_set: bool) -> str:
-    """Opportunistically prefer a BlackHole-containing aggregate device
-    when the user hasn't pinned one explicitly.
+    """Resolve the device to use when the user hasn't pinned one.
 
     Returns the device string to actually use. Logs to stderr when the
-    auto-detected device differs from the default. Stays silent when no
-    aggregate is present (the default :0 works fine for mic-only).
+    resolved device differs from the bare :0 default.
 
-    Triggers ONLY when:
-      - user did not pass --device on the CLI (default ":0")
-      - MEETING_DEVICE env var is unset
-      - an avfoundation aggregate device whose name contains "blackhole"
-        OR whose name suggests it's an aggregate is present
+    Triggers ONLY when the user did not pass --device on the CLI (default
+    ":0") and MEETING_DEVICE is unset. Resolution order:
+
+      1. A BlackHole-containing aggregate device (the meeting-capture path:
+         mic + system audio in one stream). Preferred when present.
+      2. Else the first input that looks like a real microphone and is not
+         a loopback. avfoundation indices are positional and unstable, so a
+         hardcoded :0 may resolve to BlackHole (a silent loopback) rather
+         than the mic. Resolving by name survives device reordering.
+      3. Else the bare :0 default unchanged.
     """
     if user_device != ":0" or env_set:
         return user_device
@@ -134,12 +137,31 @@ def auto_detect_device(user_device: str, env_set: bool) -> str:
     plain_agg = [(i, n) for i, n in devs
                  if "aggregate" in n.lower() and i != "0"]
     pick = (bh_agg or plain_agg)[:1]
-    if not pick:
+    if pick:
+        i, n = pick[0]
+        sys.stderr.write(
+            f"[auto-detect] using aggregate device :{i} ({n}). "
+            f"pass --device ':0' to force mic-only.\n"
+        )
+        return f":{i}"
+
+    # No aggregate: resolve a real mic by name rather than trusting :0.
+    _LOOPBACK = ("blackhole", "aggregate", "multi-output", "soundflower",
+                 "loopback")
+    _MIC_HINT = ("microphone", "mic", "built-in", "macbook")
+    mics = [(i, n) for i, n in devs
+            if not any(w in n.lower() for w in _LOOPBACK)]
+    named = [(i, n) for i, n in mics
+             if any(w in n.lower() for w in _MIC_HINT)]
+    mic_pick = (named or mics)[:1]
+    if not mic_pick:
         return user_device
-    i, n = pick[0]
+    i, n = mic_pick[0]
+    if i == "0":
+        return user_device  # :0 already the mic; no message needed
     sys.stderr.write(
-        f"[auto-detect] using aggregate device :{i} ({n}). "
-        f"pass --device ':0' to force mic-only.\n"
+        f"[auto-detect] using mic :{i} ({n}); :0 is not a microphone. "
+        f"pass --device or set MEETING_DEVICE to override.\n"
     )
     return f":{i}"
 
