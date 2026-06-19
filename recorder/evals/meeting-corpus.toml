@@ -20,5 +20,10 @@ path = "~/recordings/20260506-163338.flac"
 duration_s = 1190.0
 speakers = 5
 ref_transcript = "~/recordings/20260506-163338.offline-frozen.txt"
-ref_rttm = "~/recordings/20260506-163338.diarized.json"
-notes = "full real meeting (19:50); skip-live for fast iteration"
+# ref_rttm intentionally empty: this clip has no human-labeled speaker
+# reference. It previously pointed at the pipeline's own .diarized.json
+# output, which makes DER circular (the diarizer scored against itself reads
+# ~0 regardless of how wrong the clustering is). Real diarization DER is
+# measured on the AMI corpus (ami-corpus.toml), which ships human RTTM.
+ref_rttm = ""
+notes = "full real meeting (19:50); WER-only ref; no speaker ground truth"

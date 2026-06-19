@@ -1047,6 +1047,78 @@ def cmd_diarize_stability(flac_path: Path, runs: int = 2,
     return 0
 
 
+def cmd_diarize_der(corpus_toml: Path, clip_filter: Optional[str] = None,
+                    threshold: Optional[float] = None) -> int:
+    """Run diarization on each corpus clip that has an RTTM ground truth and
+    report DER against it. This is the real diarization-quality measurement
+    (vs diarize-stability, which only measures self-consistency).
+
+    Runs `recorder diarize` per clip, reads the .diarized.json speaker_spans
+    (the diarizer's direct speaker timeline, before sentence attachment), and
+    scores them against the human RTTM via compute_der (NIST collar 0.25s).
+    Reports per-clip DER + detected-vs-true speaker count, then the mean.
+    """
+    clips = load_corpus(clip_filter=clip_filter, corpus_toml=corpus_toml)
+    scored = [c for c in clips if c.ref_rttm]
+    if not scored:
+        log.error("no clips with ref_rttm in %s", corpus_toml)
+        return 1
+
+    print(f"\nDiarization DER vs ground truth: {corpus_toml.name}")
+    print(f"  threshold: {threshold if threshold is not None else 'default'}\n")
+    print(f"  {'clip':<16} {'true':>4} {'detected':>8} {'DER':>8}")
+    print(f"  {'-'*16} {'-'*4} {'-'*8} {'-'*8}")
+
+    ders: list[float] = []
+    for clip in scored:
+        if not clip.path.exists():
+            log.warning("skip %s: audio not found %s", clip.id, clip.path)
+            continue
+        out_dir = clip.path.parent
+        name = clip.path.stem
+        json_path = out_dir / f"{name}.diarized.json"
+        offline_json = out_dir / f"{name}.offline.json"
+        # `recorder diarize` attaches speakers to the offline transcript's
+        # sentences, so the offline pass must run first. Skip if already present.
+        if not offline_json.exists():
+            log.info("[%s] offline pass (required before diarize) ...", clip.id)
+            ro = subprocess.run(
+                ["recorder", "redo", str(clip.path), "--force"],
+                capture_output=True, text=True, timeout=1800)
+            if ro.returncode != 0 or not offline_json.exists():
+                log.error("offline pass failed for %s: rc=%d %s",
+                          clip.id, ro.returncode, ro.stderr[-160:])
+                continue
+        cmd = ["recorder", "diarize", str(clip.path), "--force"]
+        if threshold is not None:
+            cmd += ["--threshold", str(threshold)]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0 or not json_path.exists():
+            log.error("diarize failed for %s: rc=%d %s",
+                      clip.id, r.returncode, r.stderr[-160:])
+            continue
+        d = json.loads(json_path.read_text(encoding="utf-8"))
+        detected = d.get("speakers_detected", 0)
+        # speaker_spans is the diarizer's raw timeline: [{start, end, speaker}].
+        spans = [(s["start"], s["end"] - s["start"], f"SPK{s['speaker']}")
+                 for s in d.get("speaker_spans", [])]
+        # clip.ref_rttm is non-None here (scored = clips with ref_rttm).
+        der = (compute_der(spans, clip.ref_rttm)
+               if spans and clip.ref_rttm else None)
+        if der is not None:
+            ders.append(der)
+        der_str = f"{der*100:.1f}%" if der is not None else "n/a"
+        print(f"  {clip.id:<16} {clip.speakers:>4} {detected:>8} {der_str:>8}")
+
+    if ders:
+        mean = sum(ders) / len(ders)
+        print(f"\n  mean DER: {mean*100:.1f}%  (n={len(ders)}, lower is better)")
+    else:
+        print("\n  no DER computed (is pyannote.metrics installed?)")
+        return 1
+    return 0
+
+
 def cmd_polish_ab(source_path: Path, ref_path: Optional[Path] = None) -> int:
     """Run gemma4 polish on `source_path` and compare WER vs the reference
     (the source itself if no ref). Reports:
@@ -1135,12 +1207,13 @@ def main() -> None:
     parser.add_argument(
         "--mode", default="wer",
         choices=["wer", "hallucination", "search-recall", "polish-ab",
-                 "diarize-stability"],
+                 "diarize-stability", "diarize-der"],
         help="eval mode: wer (default, live vs offline WER), "
              "hallucination (proper-nouns/dates in summary not in source), "
              "search-recall (inject phrases, query, measure hit-rate), "
              "polish-ab (run recorder polish on a transcript, compare WER), "
-             "diarize-stability (run diarize N times on a FLAC, measure variance)",
+             "diarize-stability (run diarize N times on a FLAC, measure variance), "
+             "diarize-der (run diarize per corpus clip, score DER vs RTTM ground truth)",
     )
     parser.add_argument(
         "--source", default=None,
@@ -1240,6 +1313,15 @@ def main() -> None:
         sys.exit(cmd_diarize_stability(
             Path(args.flac).expanduser(),
             runs=args.runs, threshold=args.threshold,
+        ))
+    if args.mode == "diarize-der":
+        if not args.corpus:
+            log.error("--mode diarize-der requires --corpus <toml> "
+                      "(clips need ref_rttm), e.g. evals/ami-corpus.toml")
+            sys.exit(2)
+        sys.exit(cmd_diarize_der(
+            Path(args.corpus).expanduser(),
+            clip_filter=args.clip, threshold=args.threshold,
         ))
 
     # --corpus may be a .toml file or a directory containing corpus.toml.
