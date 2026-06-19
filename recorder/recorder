@@ -1067,6 +1067,16 @@ mark.find-hit.current {
 
   // ---- transcript view (raw / polished) ------------------------------------
 
+  // Join streaming token-fragment segments without destroying token-level
+  // spacing. A word can split across two finalized batches ("...the b" +
+  // "ank..."); each fragment carries its own leading-space convention, so the
+  // correct reassembly is plain concatenation, not strip-each-then-space-join
+  // (which turned "bank" into "b ank"). Collapse double spaces, then trim.
+  // Mirror of join_fragments() on the Python side.
+  function joinFragments(fragments) {
+    return fragments.join('').replace(/[ \t]{2,}/g, ' ').trim();
+  }
+
   function viewSegments(state) {
     const segs = state.segments || [];
     const polished = state.polished_segments || [];
@@ -1092,12 +1102,12 @@ mark.find-hit.current {
     const segViews = viewSegments(state);
     const markers = state.markers || [];
     let out = ''; let mi = 0; let buf = [];
-    const flush = () => { if (buf.length) { out += buf.join(' ').trim() + '\n\n'; buf = []; } };
+    const flush = () => { if (buf.length) { out += joinFragments(buf) + '\n\n'; buf = []; } };
     for (const sv of segViews) {
       while (mi < markers.length && markers[mi].t <= sv.t) {
         flush(); out += markers[mi].label + '\n\n'; mi++;
       }
-      buf.push(sv.text.trim());
+      buf.push(sv.text);
     }
     flush();
     while (mi < markers.length) { out += markers[mi].label + '\n\n'; mi++; }
@@ -1428,8 +1438,8 @@ mark.find-hit.current {
     let mi = 0;
     const flushPara = () => {
       if (!buf.length) return;
-      const paraText = buf.map(b => b.text.trim()).join(' ');
-      const paraRaw = buf.map(b => b.raw.trim()).join(' ');
+      const paraText = joinFragments(buf.map(b => b.text));
+      const paraRaw = joinFragments(buf.map(b => b.raw));
       const isPolished = !showRaw && paraText !== paraRaw;
       // role="article" gives ARIA-feed pattern; tabindex=-1 lets each
       // paragraph be programmatically focusable for jump-to-time without
@@ -1688,6 +1698,25 @@ def md_footer(audio_s: float, wall_s: float, ended: str) -> str:
     )
 
 
+def join_fragments(fragments: list[str]) -> str:
+    """Join streaming token-fragment segments WITHOUT destroying token-level
+    spacing.
+
+    parakeet's transcribe_stream finalizes tokens in batches, and a single
+    word can split across two batches: "...the b" then "ank pack...". Each
+    fragment carries its own leading-space convention (a new word begins with
+    a space, a word-continuation does not), so the correct reassembly is plain
+    concatenation. The old `" ".join(f.strip() for f in fragments)` stripped
+    the boundary that distinguished continuation from new-word AND inserted a
+    space, turning "bank" into "b ank" and "integral" into "inte gral".
+
+    Concatenate verbatim, then collapse runs of whitespace (the ASR also emits
+    occasional double spaces) and trim the ends.
+    """
+    joined = "".join(fragments)
+    return re.sub(r"[ \t]{2,}", " ", joined).strip()
+
+
 def _segments_view(snap: dict) -> list[dict]:
     """Build the polished-when-available segment view (parallel to JS viewSegments)."""
     segs = snap["segments"]
@@ -1722,15 +1751,15 @@ def render_md(state: TranscriptState, ended: str | None = None) -> str:
     for sv in seg_views:
         while mi < len(markers) and markers[mi]["t"] <= sv["t"]:
             if paragraph:
-                out.append(" ".join(paragraph).strip())
+                out.append(join_fragments(paragraph))
                 out.append("")
                 paragraph = []
             out.append(f"### {markers[mi]['label']}")
             out.append("")
             mi += 1
-        paragraph.append(sv["text"].strip())
+        paragraph.append(sv["text"])
     if paragraph:
-        out.append(" ".join(paragraph).strip())
+        out.append(join_fragments(paragraph))
         out.append("")
     while mi < len(markers):
         out.append(f"### {markers[mi]['label']}")
@@ -3964,12 +3993,18 @@ def main() -> int:
                 if len(finalized) > written:
                     new_batch = finalized[written:]
                     new_text = "".join(t.text for t in new_batch)
-                    # Label with the FIRST new token's start time. Using the
-                    # last token's time was a bug: a later batch whose first
-                    # token started earlier than a previous batch's last token
-                    # would sort BEFORE the previous batch in the rendered .md,
-                    # producing scrambled output.
-                    seg_t = new_batch[0].start if new_batch else audio_s
+                    # Timestamp the batch with cumulative audio-elapsed seconds
+                    # (audio_s), NOT the token's .start. In transcribe_stream the
+                    # per-token .start is chunk-relative (always ~0-2s, it never
+                    # accumulates), so every segment landed below every marker's
+                    # true-elapsed time (300/600/...), and markers never
+                    # interleaved -- they all dumped at the end of the transcript.
+                    # audio_s is strictly monotonic, so it both fixes the marker
+                    # interleave AND can't scramble segment order (the earlier
+                    # bug that picking new_batch[0].start was meant to avoid). It
+                    # lags true spoken time by the finalization delay (a few s),
+                    # which is acceptable for 5-min markers.
+                    seg_t = audio_s
                     written = len(finalized)
                     if new_text:
                         os.write(txt_fd, new_text.encode("utf-8"))
