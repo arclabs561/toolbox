@@ -45,7 +45,8 @@ As a backstop, when frames arrive but stay silent (peak below -80 dB) for 8 seco
 ```sh
 recorder                           # timestamp name, ~/recordings/, defaults
 recorder team-sync                 # custom basename
-recorder --diarize                 # add speaker labels post-meeting
+recorder --diarize                 # force speaker labels post-meeting
+recorder --no-diarize              # force diarization off
 recorder --diarize --summary       # + action items / decisions via gemma4
 recorder --polish                  # EXPERIMENTAL streaming LLM polish
 recorder --no-offline-pass         # skip offline transcription pass (faster teardown)
@@ -58,6 +59,8 @@ recorder --device ":2"             # pick a non-default device
 A browser tab opens automatically to the live transcript page. Ctrl-C once = clean stop (everything flushed). Ctrl-C twice = hard exit. The **stop** button in the live page also works without touching the terminal.
 
 After the meeting ends, `recorder` automatically runs a higher-accuracy offline transcription pass (unless `--no-offline-pass` is set). The offline `.md` and `.txt` files land in the same directory when it finishes. Progress is shown in the terminal; the live page keeps the streaming transcript visible while it runs.
+
+Diarization (speaker labels) runs by default on every recording. There is no length or speaker-count gate: the sherpa-onnx clustering is too noisy to reliably decide solo-vs-meeting (a few-second solo clip clusters to 2+ speakers, and a multi-person meeting over-clusters), so any auto-skip heuristic fires wrong. Turn it off with `--no-diarize`, or set the default off with `MEETING_DIARIZE=0`. Note that meeting recordings currently over-cluster (more labeled speakers than were actually present); this is a known clustering-quality limitation being calibrated against the AMI benchmark, not a transcription error.
 
 ## Quick start: push-to-talk dictation
 
@@ -153,6 +156,7 @@ The `.md` files are written atomically; reference any of them mid-meeting or aft
 | `PARAKEET_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | parakeet-mlx HF repo |
 | `MEETING_POLISH_MODEL` | `gemma4:e2b` | streaming polish model |
 | `MEETING_SUMMARY_MODEL` | `gemma4:latest` | summary model |
+| `MEETING_DIARIZE` | on | `0` disables diarization by default; `--no-diarize` overrides per-run |
 | `MEETING_GLOSSARY` | `~/recordings/.glossary.txt` | one named-entity per line for polish |
 | `MEETING_STREAM_DEPTH` | `8` | encoder layers using full (non-streaming) attention |
 | `MEETING_CONTEXT_SIZE` | `256` | token context window for streaming pass |

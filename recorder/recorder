@@ -3757,10 +3757,22 @@ def main() -> int:
                    help="skip the offline re-pass on the saved FLAC after stop "
                         "(default: re-pass runs, producing higher-quality "
                         "<name>.offline.{md,txt,json})")
-    p.add_argument("--diarize", action="store_true",
-                   help="after offline pass, run sherpa-onnx pyannote diarization "
-                        "to attach speaker labels (writes <name>.diarized.{md,json}). "
-                        "Auto-downloads ~35MB of models on first run.")
+    # Diarization runs by default. --no-diarize turns it off;
+    # MEETING_DIARIZE=0 sets the default off. There is no length or
+    # speaker-count gate (the clustering is too noisy to gate on -- see the
+    # call site), so every recording is diarized unless turned off.
+    _diarize_env = os.environ.get("MEETING_DIARIZE")
+    _diarize_default = (
+        None if _diarize_env is None
+        else _diarize_env.strip().lower() in ("1", "true", "yes", "on")
+    )
+    p.add_argument("--diarize", action=argparse.BooleanOptionalAction,
+                   default=_diarize_default,
+                   help="run sherpa-onnx pyannote diarization after the offline "
+                        "pass to attach speaker labels (writes "
+                        "<name>.diarized.{md,json}; auto-downloads ~35MB on first "
+                        "run). On by default; --no-diarize turns it off, "
+                        "MEETING_DIARIZE=0 sets the default off.")
     p.add_argument("--num-speakers", type=int, default=-1,
                    help="number of speakers to find (default -1 = auto-detect)")
     p.add_argument("--diarize-threshold", type=float, default=0.65,
@@ -4160,8 +4172,12 @@ def main() -> int:
             except Exception as e:
                 print(f"search index update skipped: {e}", file=sys.stderr)
 
-    # Diarization: speakers_detected + diarized.md alongside offline.md
-    if args.diarize:
+    # Diarization runs by default (auto). args.diarize: True = forced on,
+    # False = --no-diarize, None = auto (= on). There is no length or
+    # speaker-count gate: the sherpa-onnx clustering is too noisy to decide
+    # solo-vs-meeting from (a 5s solo clip clusters to 2 speakers; a 4-person
+    # meeting over-clusters to ~18), so any auto-skip heuristic fires wrong.
+    if args.diarize is not False:
         if offline_paths is None:
             if args.no_offline_pass:
                 print("diarize skipped: requires --no-offline-pass to be off",
