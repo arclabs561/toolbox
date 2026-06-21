@@ -2,9 +2,10 @@
 
 use std::path::Path;
 
-/// One project: its directory name and (truncated) README text.
+/// One project: its directory name, path, and (truncated) README text.
 pub struct Project {
     pub name: String,
+    pub dir: std::path::PathBuf,
     pub readme: String,
 }
 
@@ -46,6 +47,7 @@ pub fn discover(root: &Path) -> std::io::Result<Vec<Project>> {
         let truncated: String = text.chars().take(CHAR_BUDGET).collect();
         out.push(Project {
             name,
+            dir: entry.path(),
             readme: truncated,
         });
     }

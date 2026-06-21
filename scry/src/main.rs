@@ -3,8 +3,8 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use scry::{
-    argsort_desc, cache::Cache, cluster_labels, corpus, cosine_scores, embed_texts, medoid_labels,
-    openrouter::Client, plan_scopes, rrf_fuse,
+    argsort_desc, cache::Cache, cluster_labels, corpus, cosine_scores, embed_code, embed_texts,
+    medoid_labels, openrouter::Client, plan_scopes, rrf_fuse,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -24,6 +24,12 @@ struct Cli {
     /// Optionally truncate the embedding dimension (Matryoshka).
     #[arg(long, global = true)]
     dimensions: Option<u32>,
+    /// Embedding surface: `readme` (instruction-scoped) or `code` (source files).
+    #[arg(long, global = true, default_value = "readme")]
+    surface: String,
+    /// Model for the `code` surface.
+    #[arg(long, global = true, default_value = "mistralai/codestral-embed-2505")]
+    code_model: String,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -88,6 +94,52 @@ fn parse_scopes(spec: &str) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// Cluster one matrix, print the groups under `title`, and return the JSON.
+fn cluster_and_emit(
+    title: &str,
+    mat: &[Vec<f32>],
+    k: Option<usize>,
+    names: &[String],
+) -> Result<serde_json::Value> {
+    let labels = cluster_labels(mat, k)?;
+    let medoid = medoid_labels(mat, &labels, names);
+    let mut groups: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for (n, lab) in names.iter().zip(&labels) {
+        groups
+            .entry(lab.map(|l| l as i64).unwrap_or(-1))
+            .or_default()
+            .push(n.clone());
+    }
+    println!("\n=== {title} ===");
+    let mut group_json = serde_json::Map::new();
+    for (key, members) in &groups {
+        let mut sorted = members.clone();
+        sorted.sort();
+        let tag = if *key == -1 {
+            "noise".to_string()
+        } else {
+            format!("~{}", medoid[key])
+        };
+        println!("  {} ({})", tag, members.len());
+        println!("    {}", sorted.join(", "));
+        group_json.insert(
+            key.to_string(),
+            serde_json::json!({ "medoid": medoid.get(key), "projects": sorted }),
+        );
+    }
+    let label_map: serde_json::Map<String, serde_json::Value> = names
+        .iter()
+        .zip(&labels)
+        .map(|(n, l)| {
+            (
+                n.clone(),
+                serde_json::json!(l.map(|x| x as i64).unwrap_or(-1)),
+            )
+        })
+        .collect();
+    Ok(serde_json::json!({ "labels": label_map, "groups": group_json }))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -97,71 +149,51 @@ async fn main() -> Result<()> {
 
     match &cli.cmd {
         Cmd::Cluster { scopes, k, out } => {
-            let scopes = parse_scopes(scopes)?;
             let projects = corpus::discover(&root)?;
             if projects.is_empty() {
                 bail!("no projects with READMEs under {}", root.display());
             }
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
-            eprintln!(
-                "{} projects · scopes={:?} · model={}",
-                projects.len(),
-                scopes.iter().map(|(n, _)| n).collect::<Vec<_>>(),
-                cli.model
-            );
-
             let mut clusters_json = serde_json::Map::new();
-            for (name, instr) in &scopes {
-                let inputs: Vec<String> = projects
-                    .iter()
-                    .map(|p| corpus::format_input(instr, &p.readme))
-                    .collect();
-                let mat =
-                    embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs).await?;
-                let labels = cluster_labels(&mat, *k)?;
-                let medoid = medoid_labels(&mat, &labels, &names);
 
-                let mut groups: BTreeMap<i64, Vec<String>> = BTreeMap::new();
-                for (n, lab) in names.iter().zip(&labels) {
-                    groups
-                        .entry(lab.map(|l| l as i64).unwrap_or(-1))
-                        .or_default()
-                        .push(n.clone());
-                }
-                println!("\n=== scope: {name} ===");
-                let mut group_json = serde_json::Map::new();
-                for (key, members) in &groups {
-                    let mut sorted = members.clone();
-                    sorted.sort();
-                    let tag = if *key == -1 {
-                        "noise".to_string()
-                    } else {
-                        format!("~{}", medoid[key])
-                    };
-                    println!("  {} ({})", tag, members.len());
-                    println!("    {}", sorted.join(", "));
-                    group_json.insert(
-                        key.to_string(),
-                        serde_json::json!({
-                            "medoid": medoid.get(key),
-                            "projects": sorted,
-                        }),
+            if cli.surface == "code" {
+                let (mat, capped, codeless) = embed_code(
+                    &client,
+                    &mut cache,
+                    &cli.code_model,
+                    cli.dimensions,
+                    &projects,
+                )
+                .await?;
+                eprintln!(
+                    "{} projects · surface=code · model={} · {capped} capped / {codeless} codeless",
+                    projects.len(),
+                    cli.code_model
+                );
+                clusters_json.insert(
+                    "code".into(),
+                    cluster_and_emit("surface: code", &mat, *k, &names)?,
+                );
+            } else {
+                let scopes = parse_scopes(scopes)?;
+                eprintln!(
+                    "{} projects · scopes={:?} · model={}",
+                    projects.len(),
+                    scopes.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+                    cli.model
+                );
+                for (name, instr) in &scopes {
+                    let inputs: Vec<String> = projects
+                        .iter()
+                        .map(|p| corpus::format_input(instr, &p.readme))
+                        .collect();
+                    let mat = embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs)
+                        .await?;
+                    clusters_json.insert(
+                        name.clone(),
+                        cluster_and_emit(&format!("scope: {name}"), &mat, *k, &names)?,
                     );
                 }
-                let label_map: serde_json::Map<String, serde_json::Value> = names
-                    .iter()
-                    .zip(&labels)
-                    .map(|(n, l)| {
-                        (
-                            n.clone(),
-                            serde_json::json!(l.map(|x| x as i64).unwrap_or(-1)),
-                        )
-                    })
-                    .collect();
-                clusters_json.insert(
-                    name.clone(),
-                    serde_json::json!({ "labels": label_map, "groups": group_json }),
-                );
             }
             std::fs::create_dir_all(out)?;
             std::fs::write(
@@ -182,21 +214,52 @@ async fn main() -> Result<()> {
             top,
             json,
         } => {
-            let instr = corpus::resolve_scope(scope);
             let projects = corpus::discover(&root)?;
             if projects.is_empty() {
                 bail!("no projects with READMEs under {}", root.display());
             }
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
-            let doc_inputs: Vec<String> = projects
-                .iter()
-                .map(|p| corpus::format_input(&instr, &p.readme))
-                .collect();
-            let docs =
-                embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs).await?;
-            let q_input = corpus::format_input(&instr, text);
-            let qv =
-                embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &[q_input]).await?;
+            let (docs, qv, scope_label) = if cli.surface == "code" {
+                let (docs, capped, codeless) = embed_code(
+                    &client,
+                    &mut cache,
+                    &cli.code_model,
+                    cli.dimensions,
+                    &projects,
+                )
+                .await?;
+                eprintln!(
+                    "surface=code · model={} · {capped} capped / {codeless} codeless",
+                    cli.code_model
+                );
+                let qv = embed_texts(
+                    &client,
+                    &mut cache,
+                    &cli.code_model,
+                    cli.dimensions,
+                    std::slice::from_ref(text),
+                )
+                .await?;
+                (docs, qv, "code".to_string())
+            } else {
+                let instr = corpus::resolve_scope(scope);
+                let doc_inputs: Vec<String> = projects
+                    .iter()
+                    .map(|p| corpus::format_input(&instr, &p.readme))
+                    .collect();
+                let docs =
+                    embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs)
+                        .await?;
+                let qv = embed_texts(
+                    &client,
+                    &mut cache,
+                    &cli.model,
+                    cli.dimensions,
+                    &[corpus::format_input(&instr, text)],
+                )
+                .await?;
+                (docs, qv, instr)
+            };
             let scores = cosine_scores(&docs, &qv[0]);
             let order = argsort_desc(&scores);
 
@@ -208,10 +271,10 @@ async fn main() -> Result<()> {
             if *json {
                 println!(
                     "{}",
-                    serde_json::json!({ "query": text, "scope": instr, "results": results })
+                    serde_json::json!({ "query": text, "scope": scope_label, "results": results })
                 );
             } else {
-                eprintln!("query: {text:?}\nscope: {instr:?}");
+                eprintln!("query: {text:?}\nscope: {scope_label:?}");
                 for &i in order.iter().take(*top) {
                     println!("  {:.4}  {}", scores[i], names[i]);
                 }
@@ -226,6 +289,9 @@ async fn main() -> Result<()> {
             top,
             json,
         } => {
+            if cli.surface == "code" {
+                eprintln!("note: ask uses the readme surface (code not supported for ask yet)");
+            }
             let (scopes, query) = plan_scopes(&client, planner, text).await?;
             let projects = corpus::discover(&root)?;
             if projects.is_empty() {

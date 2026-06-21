@@ -36,11 +36,24 @@ scry query "tools that talk to an LLM" --json
 # ask: a planner LLM derives the scope(s) + query, then fuses (dual-LLM)
 scry ask "which projects could help build code search" --top 6
 scry ask "tools for ranking LLM outputs" --json
+
+# code surface: embed source files instead of READMEs (for cluster + query)
+scry --surface code query "lock-free ring buffer"
+scry --surface code cluster --k 10
 ```
 
 Shared flags (before the subcommand): `--root` (default `~/Documents/dev`),
 `--model` (default `qwen/qwen3-embedding-8b`), `--dimensions` (Matryoshka
-truncation).
+truncation), `--surface readme|code`, `--code-model` (default
+`mistralai/codestral-embed-2505`).
+
+## Surfaces
+
+The `readme` surface (default) embeds each project's README under instruction
+scopes. The `code` surface walks each project's source files, chunks them
+(capped per project to bound cost), embeds the chunks with a code model, and
+mean-pools to one vector per project. `cluster` and `query` honor `--surface`;
+`ask` currently uses the `readme` surface only.
 
 ## Combining multiple scopes
 

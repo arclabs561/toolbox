@@ -20,12 +20,14 @@
 //!    way to merge rankings whose score ranges differ per lens).
 
 pub mod cache;
+pub mod code;
 pub mod corpus;
 pub mod openrouter;
 
 use anyhow::{Context, Result};
 use cache::Cache;
 use clump::{EVoC, EVoCParams};
+use corpus::Project;
 use futures::stream::{self, StreamExt};
 use openrouter::Client;
 
@@ -80,6 +82,59 @@ pub async fn embed_texts(
     }
 
     Ok(keys.iter().map(|k| cache.map[k].clone()).collect())
+}
+
+/// Embed the `code` surface: one mean-pooled vector per project, built from its
+/// source-file chunks (embedded with `model`, typically a code model). Chunks
+/// are embedded through the same cache. Returns `(vectors, capped, codeless)`:
+/// how many projects hit the per-project chunk cap, and how many had no source
+/// at all (those get a zero vector and sort last / cluster as noise).
+pub async fn embed_code(
+    client: &Client,
+    cache: &mut Cache,
+    model: &str,
+    dimensions: Option<u32>,
+    projects: &[Project],
+) -> Result<(Vec<Vec<f32>>, usize, usize)> {
+    let mut all_chunks: Vec<String> = Vec::new();
+    let mut counts: Vec<usize> = Vec::with_capacity(projects.len());
+    let mut capped = 0usize;
+    for p in projects {
+        let (chunks, was_capped) = code::gather_chunks(&p.dir);
+        if was_capped {
+            capped += 1;
+        }
+        counts.push(chunks.len());
+        all_chunks.extend(chunks);
+    }
+    if all_chunks.is_empty() {
+        anyhow::bail!("no source files found under any project");
+    }
+    let chunk_vecs = embed_texts(client, cache, model, dimensions, &all_chunks).await?;
+    let dim = chunk_vecs[0].len();
+
+    let mut vectors = Vec::with_capacity(projects.len());
+    let mut codeless = 0usize;
+    let mut offset = 0usize;
+    for &count in &counts {
+        if count == 0 {
+            codeless += 1;
+            vectors.push(vec![0.0f32; dim]);
+            continue;
+        }
+        let mut pooled = vec![0.0f32; dim];
+        for v in &chunk_vecs[offset..offset + count] {
+            for (acc, x) in pooled.iter_mut().zip(v) {
+                *acc += x;
+            }
+        }
+        for acc in &mut pooled {
+            *acc /= count as f32;
+        }
+        vectors.push(pooled);
+        offset += count;
+    }
+    Ok((vectors, capped, codeless))
 }
 
 /// L2-normalize a vector (zero vectors are left unchanged).
