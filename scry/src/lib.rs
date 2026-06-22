@@ -248,6 +248,29 @@ pub fn argsort_desc(scores: &[f32]) -> Vec<usize> {
     idx
 }
 
+/// 0-based rank of each item by descending score (`rank[i]` = position of `i`).
+pub fn ranks_desc(scores: &[f32]) -> Vec<usize> {
+    let mut r = vec![0usize; scores.len()];
+    for (pos, &i) in argsort_desc(scores).iter().enumerate() {
+        r[i] = pos;
+    }
+    r
+}
+
+/// Concatenate two aligned vector sets, L2-normalizing each part first so neither
+/// surface dominates by magnitude. Used for the `both` cluster surface (joint
+/// readme+code feature space).
+pub fn concat_normalized(a: &[Vec<f32>], b: &[Vec<f32>]) -> Vec<Vec<f32>> {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| {
+            let mut v = l2_normalize(x);
+            v.extend(l2_normalize(y));
+            v
+        })
+        .collect()
+}
+
 /// Dual-LLM planner: turn a natural-language question into 1-3 scope lenses plus
 /// a query string. The model emits structured intent only; the caller executes
 /// the read-only retrieval. Returns `(scopes, query)`.
@@ -286,4 +309,63 @@ pub async fn plan_scopes(
         .unwrap_or(question)
         .to_string();
     Ok((scopes, query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn l2_normalize_unit_and_zero() {
+        let v = l2_normalize(&[3.0, 4.0]);
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        assert_eq!(l2_normalize(&[0.0, 0.0]), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn cosine_scores_identical_orthogonal_and_45deg() {
+        let docs = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 1.0]];
+        let s = cosine_scores(&docs, &[1.0, 0.0]);
+        assert!((s[0] - 1.0).abs() < 1e-6);
+        assert!(s[1].abs() < 1e-6);
+        assert!((s[2] - 1.0 / 2f32.sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn argsort_and_ranks_agree() {
+        let scores = [0.1, 0.5, 0.9];
+        assert_eq!(argsort_desc(&scores), vec![2, 1, 0]);
+        assert_eq!(ranks_desc(&scores), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn rrf_rewards_consistent_top() {
+        // index 0 is rank 0 under both scopes; index 2 is worst under both.
+        let fused = rrf_fuse(&[vec![0, 1, 2], vec![0, 1, 2]], 3);
+        assert!(fused[0] > fused[1] && fused[1] > fused[2]);
+        // a split-decision item beats a consistently-mediocre one is NOT asserted;
+        // here we only check monotonicity under agreement.
+        assert!((fused[0] - 2.0 / (RRF_K + 0.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn concat_normalizes_each_half() {
+        let a = vec![vec![3.0, 4.0]];
+        let b = vec![vec![0.0, 5.0]];
+        let c = concat_normalized(&a, &b);
+        assert_eq!(c[0].len(), 4);
+        assert!((c[0][0] - 0.6).abs() < 1e-6 && (c[0][1] - 0.8).abs() < 1e-6);
+        assert!(c[0][2].abs() < 1e-6 && (c[0][3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn medoid_is_the_central_member() {
+        // index 2 sits between 0 and 1, so it is nearest the centroid.
+        let vecs = vec![vec![1.0, 0.0], vec![0.6, 0.8], vec![0.92, 0.39]];
+        let labels = vec![Some(0), Some(0), Some(0)];
+        let names = ["a", "b", "c"].map(String::from).to_vec();
+        let m = medoid_labels(&vecs, &labels, &names);
+        assert_eq!(m[&0], "c");
+    }
 }

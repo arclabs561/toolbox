@@ -3,8 +3,8 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use scry::{
-    argsort_desc, cache::Cache, cluster_labels, corpus, cosine_scores, embed_code, embed_texts,
-    medoid_labels, openrouter::Client, plan_scopes, rrf_fuse,
+    argsort_desc, cache::Cache, cluster_labels, concat_normalized, corpus, cosine_scores,
+    embed_code, embed_texts, medoid_labels, openrouter::Client, plan_scopes, ranks_desc, rrf_fuse,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -176,6 +176,21 @@ async fn main() -> Result<()> {
                 );
             } else {
                 let scopes = parse_scopes(scopes)?;
+                // For `both`, embed code once and concatenate it onto each scope.
+                let code_mat = if cli.surface == "both" {
+                    let (m, capped, codeless) = embed_code(
+                        &client,
+                        &mut cache,
+                        &cli.code_model,
+                        cli.dimensions,
+                        &projects,
+                    )
+                    .await?;
+                    eprintln!("surface=both · code {capped} capped / {codeless} codeless");
+                    Some(m)
+                } else {
+                    None
+                };
                 eprintln!(
                     "{} projects · scopes={:?} · model={}",
                     projects.len(),
@@ -187,12 +202,14 @@ async fn main() -> Result<()> {
                         .iter()
                         .map(|p| corpus::format_input(instr, &p.readme))
                         .collect();
-                    let mat = embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs)
-                        .await?;
-                    clusters_json.insert(
-                        name.clone(),
-                        cluster_and_emit(&format!("scope: {name}"), &mat, *k, &names)?,
-                    );
+                    let r_mat =
+                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs)
+                            .await?;
+                    let (mat, title) = match &code_mat {
+                        Some(c) => (concat_normalized(&r_mat, c), format!("scope+code: {name}")),
+                        None => (r_mat, format!("scope: {name}")),
+                    };
+                    clusters_json.insert(name.clone(), cluster_and_emit(&title, &mat, *k, &names)?);
                 }
             }
             std::fs::create_dir_all(out)?;
@@ -219,48 +236,91 @@ async fn main() -> Result<()> {
                 bail!("no projects with READMEs under {}", root.display());
             }
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
-            let (docs, qv, scope_label) = if cli.surface == "code" {
-                let (docs, capped, codeless) = embed_code(
-                    &client,
-                    &mut cache,
-                    &cli.code_model,
-                    cli.dimensions,
-                    &projects,
-                )
-                .await?;
-                eprintln!(
-                    "surface=code · model={} · {capped} capped / {codeless} codeless",
-                    cli.code_model
-                );
-                let qv = embed_texts(
-                    &client,
-                    &mut cache,
-                    &cli.code_model,
-                    cli.dimensions,
-                    std::slice::from_ref(text),
-                )
-                .await?;
-                (docs, qv, "code".to_string())
-            } else {
-                let instr = corpus::resolve_scope(scope);
-                let doc_inputs: Vec<String> = projects
-                    .iter()
-                    .map(|p| corpus::format_input(&instr, &p.readme))
-                    .collect();
-                let docs =
-                    embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs)
-                        .await?;
-                let qv = embed_texts(
-                    &client,
-                    &mut cache,
-                    &cli.model,
-                    cli.dimensions,
-                    &[corpus::format_input(&instr, text)],
-                )
-                .await?;
-                (docs, qv, instr)
+            let (scores, scope_label) = match cli.surface.as_str() {
+                "code" => {
+                    let (docs, capped, codeless) = embed_code(
+                        &client,
+                        &mut cache,
+                        &cli.code_model,
+                        cli.dimensions,
+                        &projects,
+                    )
+                    .await?;
+                    eprintln!(
+                        "surface=code · model={} · {capped} capped / {codeless} codeless",
+                        cli.code_model
+                    );
+                    let qv = embed_texts(
+                        &client,
+                        &mut cache,
+                        &cli.code_model,
+                        cli.dimensions,
+                        std::slice::from_ref(text),
+                    )
+                    .await?;
+                    (cosine_scores(&docs, &qv[0]), "code".to_string())
+                }
+                "both" => {
+                    let instr = corpus::resolve_scope(scope);
+                    let r_inputs: Vec<String> = projects
+                        .iter()
+                        .map(|p| corpus::format_input(&instr, &p.readme))
+                        .collect();
+                    let r_docs =
+                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &r_inputs)
+                            .await?;
+                    let r_q = embed_texts(
+                        &client,
+                        &mut cache,
+                        &cli.model,
+                        cli.dimensions,
+                        &[corpus::format_input(&instr, text)],
+                    )
+                    .await?;
+                    let (c_docs, capped, codeless) = embed_code(
+                        &client,
+                        &mut cache,
+                        &cli.code_model,
+                        cli.dimensions,
+                        &projects,
+                    )
+                    .await?;
+                    eprintln!("surface=both · code {capped} capped / {codeless} codeless");
+                    let c_q = embed_texts(
+                        &client,
+                        &mut cache,
+                        &cli.code_model,
+                        cli.dimensions,
+                        std::slice::from_ref(text),
+                    )
+                    .await?;
+                    let r_ranks = ranks_desc(&cosine_scores(&r_docs, &r_q[0]));
+                    let c_ranks = ranks_desc(&cosine_scores(&c_docs, &c_q[0]));
+                    (
+                        rrf_fuse(&[r_ranks, c_ranks], names.len()),
+                        "both".to_string(),
+                    )
+                }
+                _ => {
+                    let instr = corpus::resolve_scope(scope);
+                    let doc_inputs: Vec<String> = projects
+                        .iter()
+                        .map(|p| corpus::format_input(&instr, &p.readme))
+                        .collect();
+                    let docs =
+                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs)
+                            .await?;
+                    let qv = embed_texts(
+                        &client,
+                        &mut cache,
+                        &cli.model,
+                        cli.dimensions,
+                        &[corpus::format_input(&instr, text)],
+                    )
+                    .await?;
+                    (cosine_scores(&docs, &qv[0]), instr)
+                }
             };
-            let scores = cosine_scores(&docs, &qv[0]);
             let order = argsort_desc(&scores);
 
             let results: Vec<_> = order
