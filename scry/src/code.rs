@@ -14,6 +14,9 @@ const CODE_EXTS: &[&str] = &[
     "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "java", "rb",
     "scala", "swift", "kt", "ml", "hs", "jl", "lua", "sh", "sql", "ex", "exs", "clj", "zig",
 ];
+// Skip non-representative trees. The point is "what does this project do", so
+// archives, benchmarks, examples, tests, and docs are excluded — they otherwise
+// dominate the alphabetically-first chunk budget and crowd out src/.
 const SKIP_DIRS: &[&str] = &[
     "target",
     "node_modules",
@@ -25,6 +28,18 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
     ".cache",
     "vendor",
+    "archive",
+    "benches",
+    "bench",
+    "examples",
+    "example",
+    "tests",
+    "test",
+    "testdata",
+    "fixtures",
+    "docs",
+    "doc",
+    ".github",
 ];
 const MAX_FILE_BYTES: u64 = 1_000_000;
 const MAX_CHUNK_CHARS: usize = 2000;
@@ -38,8 +53,25 @@ pub const CHUNK_CHARS: usize = MAX_CHUNK_CHARS;
 pub fn list_source_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_files(dir, &mut files);
-    files.sort();
+    // Order by representativeness so the chunk cap spends on API surface first:
+    // entry points (lib/main/mod/__init__) -> anything under src/ -> the rest.
+    files.sort_by(|a, b| priority(a).cmp(&priority(b)).then_with(|| a.cmp(b)));
     files
+}
+
+/// Lower = more representative of what the project is.
+fn priority(p: &Path) -> u8 {
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if matches!(
+        name,
+        "lib.rs" | "main.rs" | "mod.rs" | "__init__.py" | "__main__.py"
+    ) {
+        0
+    } else if p.components().any(|c| c.as_os_str() == "src") {
+        1
+    } else {
+        2
+    }
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {

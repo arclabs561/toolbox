@@ -44,7 +44,16 @@ pub fn discover(root: &Path) -> std::io::Result<Vec<Project>> {
         if text.is_empty() {
             continue;
         }
-        let truncated: String = text.chars().take(CHAR_BUDGET).collect();
+        // Lead the embedded text with dense metadata (Cargo/package description
+        // + keywords): the highest-signal "what is this" summary, otherwise
+        // missing from many short READMEs.
+        let meta = read_meta(&entry.path());
+        let body = if meta.is_empty() {
+            text.to_string()
+        } else {
+            format!("{meta}\n\n{text}")
+        };
+        let truncated: String = body.chars().take(CHAR_BUDGET).collect();
         out.push(Project {
             name,
             dir: entry.path(),
@@ -73,6 +82,83 @@ fn find_readme(dir: &Path) -> Option<std::path::PathBuf> {
 /// Format one input in the instruction-conditioned form.
 pub fn format_input(instruction: &str, text: &str) -> String {
     format!("Instruct: {instruction}\nQuery: {text}")
+}
+
+/// Dense one-line project metadata: Cargo.toml description + keywords, falling
+/// back to package.json description. Best-effort line parsing (no toml/json dep).
+fn read_meta(dir: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Ok(t) = std::fs::read_to_string(dir.join("Cargo.toml")) {
+        if let Some(d) = toml_value(&t, "description") {
+            parts.push(d);
+        }
+        if let Some(k) = toml_array(&t, "keywords") {
+            parts.push(format!("keywords: {k}"));
+        }
+    }
+    if parts.is_empty() {
+        if let Ok(t) = std::fs::read_to_string(dir.join("package.json")) {
+            if let Some(d) = json_value(&t, "description") {
+                parts.push(d);
+            }
+        }
+    }
+    parts.join(". ")
+}
+
+/// First `key = "..."` value at the start of a line (Cargo.toml scalar).
+fn toml_value(t: &str, key: &str) -> Option<String> {
+    for line in t.lines() {
+        let l = line.trim_start();
+        if let Some(after) = l.strip_prefix(key) {
+            let after = after.trim_start();
+            if let Some(rhs) = after.strip_prefix('=') {
+                if let Some(inner) = rhs.trim().strip_prefix('"') {
+                    if let Some(end) = inner.find('"') {
+                        return Some(inner[..end].to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// First single-line `key = ["a", "b"]` array, joined as "a, b".
+fn toml_array(t: &str, key: &str) -> Option<String> {
+    for line in t.lines() {
+        let l = line.trim_start();
+        if let Some(after) = l.strip_prefix(key) {
+            let after = after.trim_start();
+            if let Some(rhs) = after.strip_prefix('=') {
+                if let Some(inner) = rhs.trim().strip_prefix('[') {
+                    let end = inner.find(']').unwrap_or(inner.len());
+                    let items: Vec<String> = inner[..end]
+                        .split(',')
+                        .map(|s| s.trim().trim_matches('"').trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !items.is_empty() {
+                        return Some(items.join(", "));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `"key": "value"` from a JSON blob (best-effort, no escape handling).
+fn json_value(t: &str, key: &str) -> Option<String> {
+    let pat = format!("\"{key}\"");
+    let i = t.find(&pat)?;
+    let rhs = t[i + pat.len()..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    let inner = rhs.strip_prefix('"')?;
+    let end = inner.find('"')?;
+    Some(inner[..end].to_string())
 }
 
 /// Resolve a named scope to its instruction, or pass free text through.
