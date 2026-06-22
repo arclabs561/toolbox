@@ -1,86 +1,74 @@
 //! Source-code gathering for the `code` surface.
 //!
-//! Walks a project directory, collects source files by extension, and splits
-//! them into bounded character chunks. Per-project caps keep the embedding cost
-//! finite — a project with thousands of files contributes at most
-//! [`MAX_CHUNKS`] chunks, and the caller is told when that cap clipped a project.
+//! Lists source files under a project directory (by extension) and splits text
+//! into bounded character chunks. The actual file *reads* are done by the caller
+//! with a per-file timeout, because `~/Documents/dev` lives under iCloud and a
+//! dataless/offloaded file would otherwise block `read_to_string` indefinitely.
+//! Symlinks are not followed (avoids loops), and oversize/non-regular files are
+//! skipped.
 
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 const CODE_EXTS: &[&str] = &[
-    "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "java", "rb",
-    "scala", "swift", "kt", "ml", "hs", "jl", "lua", "sh", "sql", "ex", "exs", "clj", "zig",
+    "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "java", "rb", "scala",
+    "swift", "kt", "ml", "hs", "jl", "lua", "sh", "sql", "ex", "exs", "clj", "zig",
 ];
 const SKIP_DIRS: &[&str] = &[
-    "target",
-    "node_modules",
-    ".git",
-    ".venv",
-    "venv",
-    "dist",
-    "build",
-    "__pycache__",
-    ".cache",
+    "target", "node_modules", ".git", ".venv", "venv", "dist", "build", "__pycache__", ".cache",
     "vendor",
 ];
+const MAX_FILE_BYTES: u64 = 1_000_000;
 const MAX_CHUNK_CHARS: usize = 2000;
 /// Per-project chunk cap. Bounds cost; projects exceeding it report `capped`.
 pub const MAX_CHUNKS: usize = 48;
+/// Re-exported so the caller can size its chunking the same way.
+pub const CHUNK_CHARS: usize = MAX_CHUNK_CHARS;
 
-/// Gather up to [`MAX_CHUNKS`] source chunks for one project directory.
-///
-/// Returns the chunks and whether the cap clipped this project (so the caller
-/// can report it rather than silently truncating).
-pub fn gather_chunks(dir: &Path) -> (Vec<String>, bool) {
+/// List source files under `dir` (recursive), sorted. Skips build/vendor dirs,
+/// symlinks (no loop-following), and files larger than [`MAX_FILE_BYTES`].
+pub fn list_source_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_files(dir, &mut files);
     files.sort();
-
-    let mut chunks = Vec::new();
-    let mut capped = false;
-    for f in files {
-        if chunks.len() >= MAX_CHUNKS {
-            capped = true;
-            break;
-        }
-        let Ok(text) = std::fs::read_to_string(&f) else {
-            continue;
-        };
-        for chunk in chunk_chars(&text, MAX_CHUNK_CHARS) {
-            if chunks.len() >= MAX_CHUNKS {
-                capped = true;
-                break;
-            }
-            chunks.push(chunk);
-        }
-    }
-    (chunks, capped)
+    files
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
         let name = entry.file_name().to_string_lossy().into_owned();
-        if path.is_dir() {
+        if ft.is_dir() {
             if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
                 continue;
             }
-            collect_files(&path, out);
-        } else if path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| CODE_EXTS.contains(&e))
-        {
-            out.push(path);
+            collect_files(&entry.path(), out);
+        } else if ft.is_file() {
+            let path = entry.path();
+            let ext_ok = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| CODE_EXTS.contains(&e));
+            if !ext_ok {
+                continue;
+            }
+            // Accept only resident files within the size cap. `blocks() == 0` with
+            // a nonzero size marks an iCloud-offloaded (dataless) file; reading it
+            // would block on a download, so skip it here without a read.
+            if let Ok(m) = entry.metadata() {
+                if m.blocks() > 0 && m.len() <= MAX_FILE_BYTES {
+                    out.push(path);
+                }
+            }
         }
     }
 }
 
 /// Split text into chunks of at most `max` characters, on char boundaries.
-fn chunk_chars(text: &str, max: usize) -> Vec<String> {
+pub fn chunk_text(text: &str, max: usize) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Vec::new();

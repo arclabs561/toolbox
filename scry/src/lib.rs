@@ -91,6 +91,17 @@ pub async fn embed_texts(
     Ok(keys.iter().map(|k| cache.map[k].clone()).collect())
 }
 
+/// Read a file with a hard timeout, returning `None` on timeout or error so the
+/// caller skips it. Guards against iCloud-dataless files (and fifos, stalled
+/// mounts) that would otherwise block `read_to_string` indefinitely.
+async fn read_file_bounded(path: std::path::PathBuf) -> Option<String> {
+    let fut = tokio::task::spawn_blocking(move || std::fs::read_to_string(path));
+    match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
+        Ok(Ok(Ok(s))) => Some(s),
+        _ => None,
+    }
+}
+
 /// Embed the `code` surface: one mean-pooled vector per project, built from its
 /// source-file chunks (embedded with `model`, typically a code model). Chunks
 /// are embedded through the same cache. Returns `(vectors, capped, codeless)`:
@@ -108,7 +119,24 @@ pub async fn embed_code(
     let mut capped = 0usize;
     eprintln!("gathering source from {} projects...", projects.len());
     for p in projects {
-        let (chunks, was_capped) = code::gather_chunks(&p.dir);
+        let mut chunks: Vec<String> = Vec::new();
+        let mut was_capped = false;
+        for f in code::list_source_files(&p.dir) {
+            if chunks.len() >= code::MAX_CHUNKS {
+                was_capped = true;
+                break;
+            }
+            let Some(text) = read_file_bounded(f).await else {
+                continue; // timeout (e.g. iCloud-dataless) or read error -> skip
+            };
+            for c in code::chunk_text(&text, code::CHUNK_CHARS) {
+                if chunks.len() >= code::MAX_CHUNKS {
+                    was_capped = true;
+                    break;
+                }
+                chunks.push(c);
+            }
+        }
         if was_capped {
             capped += 1;
         }
