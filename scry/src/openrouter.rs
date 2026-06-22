@@ -47,10 +47,12 @@ impl Client {
     pub fn from_env() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY")
             .context("OPENROUTER_API_KEY not set (it lives in ~/.localrc)")?;
-        Ok(Self {
-            http: reqwest::Client::new(),
-            key,
-        })
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .build()
+            .context("build http client")?;
+        Ok(Self { http, key })
     }
 
     /// Embed a batch of inputs. Returns one vector per input, in input order.

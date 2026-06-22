@@ -66,16 +66,23 @@ pub async fn embed_texts(
 
     if !miss_texts.is_empty() {
         let batches: Vec<Vec<String>> = miss_texts.chunks(BATCH_SIZE).map(|c| c.to_vec()).collect();
-        let results: Vec<Vec<Vec<f32>>> = stream::iter(batches.iter())
-            .map(|b| async move { client.embed(model, dimensions, b).await })
-            .buffered(CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
-        for (batch, vecs) in batches.iter().zip(results) {
+        let total = batches.len();
+        // Save the cache as batches land (every 8), so a long or interrupted run
+        // persists progress and a re-run resumes from the cache instead of
+        // re-embedding everything.
+        let mut stream = stream::iter(batches.iter())
+            .map(|b| async move { client.embed(model, dimensions, b).await.map(|v| (b, v)) })
+            .buffered(CONCURRENCY);
+        let mut done = 0usize;
+        while let Some(res) = stream.next().await {
+            let (batch, vecs) = res?;
             for (t, v) in batch.iter().zip(vecs) {
                 cache.map.insert(Cache::key(model, dimensions, t), v);
+            }
+            done += 1;
+            if done.is_multiple_of(8) {
+                cache.save().context("save cache")?;
+                eprintln!("  embedded {done}/{total} batches");
             }
         }
         cache.save().context("save cache")?;
@@ -99,6 +106,7 @@ pub async fn embed_code(
     let mut all_chunks: Vec<String> = Vec::new();
     let mut counts: Vec<usize> = Vec::with_capacity(projects.len());
     let mut capped = 0usize;
+    eprintln!("gathering source from {} projects...", projects.len());
     for p in projects {
         let (chunks, was_capped) = code::gather_chunks(&p.dir);
         if was_capped {
@@ -107,6 +115,7 @@ pub async fn embed_code(
         counts.push(chunks.len());
         all_chunks.extend(chunks);
     }
+    eprintln!("gathered {} chunks; embedding...", all_chunks.len());
     if all_chunks.is_empty() {
         anyhow::bail!("no source files found under any project");
     }
