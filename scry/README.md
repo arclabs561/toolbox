@@ -50,17 +50,26 @@ scry --surface both cluster --scopes purpose --k 10
 Shared flags (before the subcommand): `--root` (default `~/Documents/dev`),
 `--model` (default `qwen/qwen3-embedding-8b`), `--dimensions` (Matryoshka
 truncation), `--surface readme|code|both`, `--code-model` (default
-`mistralai/codestral-embed-2505`).
+`mistralai/codestral-embed-2505`), `--provider` (pin an OpenRouter provider for
+deterministic embeddings; folded into the cache key).
+
+## What gets embedded
+
+The `readme` surface leads each document with dense metadata (Cargo.toml /
+package.json `description` + `keywords`) followed by the README, embedded under
+an instruction scope. The `code` surface walks each project's source files and
+embeds the most representative ones first: entry points (`lib.rs` / `main.rs` /
+`mod.rs` / `__init__.py`), then anything under `src/`, skipping `benches/`,
+`tests/`, `examples/`, `archive/`, `docs/`, and vendored/build trees (they
+otherwise crowd out the real API within the per-project chunk cap). Chunks are
+mean-pooled to one vector per project. iCloud-offloaded files are skipped.
 
 ## Surfaces
 
-The `readme` surface (default) embeds each project's README under instruction
-scopes. The `code` surface walks each project's source files, chunks them
-(capped per project to bound cost), embeds the chunks with a code model, and
-mean-pools to one vector per project. The `both` surface combines them: for
-`query` it Reciprocal-Rank-Fuses the readme and code rankings, and for `cluster`
-it concatenates the L2-normalized readme and code vectors into a joint feature
-space. All three subcommands honor `--surface`: for `ask`, the code ranking
+The `both` surface combines them: for `query` it Reciprocal-Rank-Fuses the
+readme and code rankings, and for `cluster` it concatenates the L2-normalized
+readme and code vectors into a joint feature space. All three subcommands honor
+`--surface`: for `ask`, the code ranking
 joins the readme scope rankings as one more lens in the fusion (and with
 `--surface code`, the code ranking is the only lens; with `--surface both`, both;
 clustering is deterministic via a fixed seed).
