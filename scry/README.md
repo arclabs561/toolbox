@@ -36,6 +36,7 @@ scry query "tools that talk to an LLM" --json
 # ask: a planner LLM derives the scope(s) + query, then fuses (dual-LLM)
 scry ask "which projects could help build code search" --top 6
 scry ask "tools for ranking LLM outputs" --json
+scry --surface both ask "which projects implement vector search"  # +code lens
 
 # code surface: embed source files instead of READMEs (for cluster + query)
 scry --surface code query "lock-free ring buffer"
@@ -48,7 +49,7 @@ scry --surface both cluster --scopes purpose --k 10
 
 Shared flags (before the subcommand): `--root` (default `~/Documents/dev`),
 `--model` (default `qwen/qwen3-embedding-8b`), `--dimensions` (Matryoshka
-truncation), `--surface readme|code`, `--code-model` (default
+truncation), `--surface readme|code|both`, `--code-model` (default
 `mistralai/codestral-embed-2505`).
 
 ## Surfaces
@@ -59,8 +60,10 @@ scopes. The `code` surface walks each project's source files, chunks them
 mean-pools to one vector per project. The `both` surface combines them: for
 `query` it Reciprocal-Rank-Fuses the readme and code rankings, and for `cluster`
 it concatenates the L2-normalized readme and code vectors into a joint feature
-space. `cluster` and `query` honor `--surface`; `ask` currently uses the
-`readme` surface only.
+space. All three subcommands honor `--surface`: for `ask`, the code ranking
+joins the readme scope rankings as one more lens in the fusion (and with
+`--surface code`, the code ranking is the only lens; with `--surface both`, both;
+clustering is deterministic via a fixed seed).
 
 ## Combining multiple scopes
 
