@@ -30,6 +30,10 @@ struct Cli {
     /// Model for the `code` surface.
     #[arg(long, global = true, default_value = "mistralai/codestral-embed-2505")]
     code_model: String,
+    /// Pin an OpenRouter provider (e.g. Nebius). Makes embeddings deterministic
+    /// and is part of the cache key so providers never mix.
+    #[arg(long, global = true)]
+    provider: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -175,7 +179,7 @@ fn fold_lens(
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.root.clone().unwrap_or_else(corpus::default_root);
-    let client = Client::from_env()?;
+    let client = Client::from_env()?.with_provider(cli.provider.clone());
     let mut cache = Cache::load(Cache::default_path());
 
     match &cli.cmd {

@@ -14,6 +14,7 @@ const CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 pub struct Client {
     http: reqwest::Client,
     key: String,
+    provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -52,7 +53,24 @@ impl Client {
             .connect_timeout(std::time::Duration::from_secs(20))
             .build()
             .context("build http client")?;
-        Ok(Self { http, key })
+        Ok(Self {
+            http,
+            key,
+            provider: None,
+        })
+    }
+
+    /// Pin a specific upstream provider (OpenRouter `provider.only`). Makes
+    /// embeddings deterministic across runs and is folded into the cache key, so
+    /// vectors from different providers never mix in the cache.
+    pub fn with_provider(mut self, provider: Option<String>) -> Self {
+        self.provider = provider;
+        self
+    }
+
+    /// The pinned provider, if any (part of the cache key).
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
     }
 
     /// Embed a batch of inputs. Returns one vector per input, in input order.
@@ -69,6 +87,9 @@ impl Client {
         let mut body = serde_json::json!({ "model": model, "input": inputs });
         if let Some(d) = dimensions {
             body["dimensions"] = d.into();
+        }
+        if let Some(p) = &self.provider {
+            body["provider"] = serde_json::json!({ "only": [p] });
         }
         for attempt in 0..4u32 {
             let resp = self

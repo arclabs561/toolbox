@@ -48,9 +48,10 @@ pub async fn embed_texts(
     dimensions: Option<u32>,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>> {
+    let provider = client.provider();
     let keys: Vec<String> = texts
         .iter()
-        .map(|t| Cache::key(model, dimensions, t))
+        .map(|t| Cache::key(model, provider, dimensions, t))
         .collect();
     let present = keys.iter().filter(|k| cache.map.contains_key(*k)).count();
     cache.hits += present;
@@ -77,7 +78,9 @@ pub async fn embed_texts(
         while let Some(res) = stream.next().await {
             let (batch, vecs) = res?;
             for (t, v) in batch.iter().zip(vecs) {
-                cache.map.insert(Cache::key(model, dimensions, t), v);
+                cache
+                    .map
+                    .insert(Cache::key(model, provider, dimensions, t), v);
             }
             done += 1;
             if done.is_multiple_of(8) {

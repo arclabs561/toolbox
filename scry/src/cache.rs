@@ -33,11 +33,14 @@ impl Cache {
         }
     }
 
-    /// Cache key for one input. `dimensions` is part of the key so truncated and
-    /// full-width embeddings never collide.
-    pub fn key(model: &str, dimensions: Option<u32>, text: &str) -> String {
+    /// Cache key for one input. `provider` and `dimensions` are part of the key
+    /// so different upstream providers and truncated/full-width embeddings never
+    /// collide.
+    pub fn key(model: &str, provider: Option<&str>, dimensions: Option<u32>, text: &str) -> String {
         let mut h = Sha256::new();
         h.update(model.as_bytes());
+        h.update([0]);
+        h.update(provider.unwrap_or("").as_bytes());
         h.update([0]);
         h.update(format!("{dimensions:?}").as_bytes());
         h.update([0]);
