@@ -20,6 +20,22 @@ Clustering reuses the [`clump`](https://github.com/arclabs561/clump) crate (EVoC
 it is an unpublished sibling, so the dependency is a `path` and this crate is
 local-only.
 
+## Corpus source
+
+By default the corpus is the local project dirs under `--root`. Point `--github
+<user>` at any GitHub user to use their public repos instead (description +
+topics + README per repo, `readme` surface only — there is no local tree for the
+code surface). Forks and archived repos are excluded unless `--include-forks`.
+The fetched corpus is cached per user under `~/.cache/scry/github/`; pass
+`--refresh` to refetch. Auth comes from `GITHUB_TOKEN` or `gh auth token`
+(5000/hr; unauthenticated 60/hr is fine for small users).
+
+```sh
+scry --github BurntSushi query "regular expression engine"
+scry --github BurntSushi cluster --k 8
+scry --github <user> ask "which repos do graph algorithms"
+```
+
 ## Subcommands
 
 ```sh

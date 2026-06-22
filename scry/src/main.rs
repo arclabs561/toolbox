@@ -4,7 +4,8 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use scry::{
     argsort_desc, cache::Cache, cluster_labels, concat_normalized, corpus, cosine_scores,
-    embed_code, embed_texts, medoid_labels, openrouter::Client, plan_scopes, ranks_desc, rrf_fuse,
+    embed_code, embed_texts, github, medoid_labels, openrouter::Client, plan_scopes, ranks_desc,
+    rrf_fuse,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -18,6 +19,15 @@ struct Cli {
     /// Directory whose immediate subdirectories are projects (default: ~/Documents/dev).
     #[arg(long, global = true)]
     root: Option<PathBuf>,
+    /// Use a GitHub user's public repos as the corpus instead of a local dir.
+    #[arg(long, global = true)]
+    github: Option<String>,
+    /// Include forks when using --github (default: owned, non-fork only).
+    #[arg(long, global = true)]
+    include_forks: bool,
+    /// Re-fetch the --github corpus, bypassing the per-user disk cache.
+    #[arg(long, global = true)]
+    refresh: bool,
     /// OpenRouter embedding model.
     #[arg(long, global = true, default_value = "qwen/qwen3-embedding-8b")]
     model: String,
@@ -182,12 +192,24 @@ async fn main() -> Result<()> {
     let client = Client::from_env()?.with_provider(cli.provider.clone());
     let mut cache = Cache::load(Cache::default_path());
 
+    // The code/both surfaces need a local source tree; the github source is
+    // readme/metadata only.
+    if cli.github.is_some() && cli.surface != "readme" {
+        bail!(
+            "--surface {} needs a local source; the --github source is readme-only",
+            cli.surface
+        );
+    }
+    let projects = match &cli.github {
+        Some(user) => github::fetch_user(user, cli.include_forks, cli.refresh).await?,
+        None => corpus::discover(&root)?,
+    };
+    if projects.is_empty() {
+        bail!("no projects found");
+    }
+
     match &cli.cmd {
         Cmd::Cluster { scopes, k, out } => {
-            let projects = corpus::discover(&root)?;
-            if projects.is_empty() {
-                bail!("no projects with READMEs under {}", root.display());
-            }
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
             let mut clusters_json = serde_json::Map::new();
 
@@ -266,10 +288,6 @@ async fn main() -> Result<()> {
             top,
             json,
         } => {
-            let projects = corpus::discover(&root)?;
-            if projects.is_empty() {
-                bail!("no projects with READMEs under {}", root.display());
-            }
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
             let (scores, scope_label) = match cli.surface.as_str() {
                 "code" => {
@@ -385,10 +403,6 @@ async fn main() -> Result<()> {
             json,
         } => {
             let (scopes, query) = plan_scopes(&client, planner, text).await?;
-            let projects = corpus::discover(&root)?;
-            if projects.is_empty() {
-                bail!("no projects with READMEs under {}", root.display());
-            }
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
             let n = names.len();
             eprintln!(

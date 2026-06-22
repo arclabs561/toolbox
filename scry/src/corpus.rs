@@ -3,6 +3,7 @@
 use std::path::Path;
 
 /// One project: its directory name, path, and (truncated) README text.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub name: String,
     pub dir: std::path::PathBuf,

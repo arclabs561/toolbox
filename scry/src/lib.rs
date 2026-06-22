@@ -22,6 +22,7 @@
 pub mod cache;
 pub mod code;
 pub mod corpus;
+pub mod github;
 pub mod openrouter;
 
 use anyhow::{Context, Result};
