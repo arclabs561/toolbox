@@ -11,11 +11,19 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 const CODE_EXTS: &[&str] = &[
-    "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "java", "rb", "scala",
-    "swift", "kt", "ml", "hs", "jl", "lua", "sh", "sql", "ex", "exs", "clj", "zig",
+    "rs", "py", "js", "ts", "tsx", "jsx", "go", "c", "h", "cpp", "cc", "hpp", "java", "rb",
+    "scala", "swift", "kt", "ml", "hs", "jl", "lua", "sh", "sql", "ex", "exs", "clj", "zig",
 ];
 const SKIP_DIRS: &[&str] = &[
-    "target", "node_modules", ".git", ".venv", "venv", "dist", "build", "__pycache__", ".cache",
+    "target",
+    "node_modules",
+    ".git",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+    ".cache",
     "vendor",
 ];
 const MAX_FILE_BYTES: u64 = 1_000_000;

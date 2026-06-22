@@ -201,8 +201,11 @@ pub fn cosine_scores(docs: &[Vec<f32>], query: &[f32]) -> Vec<f32> {
 /// that many clusters.
 pub fn cluster_labels(vecs: &[Vec<f32>], k: Option<usize>) -> Result<Vec<Option<usize>>> {
     let normalized: Vec<Vec<f32>> = vecs.iter().map(|v| l2_normalize(v)).collect();
+    // Fixed seed so clustering is reproducible run-to-run (EVoC defaults to a
+    // random seed, which makes an agent see different clusters each call).
     let params = EVoCParams {
         min_cluster_size: 3,
+        seed: Some(0),
         ..Default::default()
     };
     let mut model = EVoC::new(params);

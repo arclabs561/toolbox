@@ -140,6 +140,37 @@ fn cluster_and_emit(
     Ok(serde_json::json!({ "labels": label_map, "groups": group_json }))
 }
 
+/// Fold one lens's scores into the `ask` accumulators: append the per-project
+/// detail, push the rank list, and (for max/mean) update the running fused score.
+#[allow(clippy::too_many_arguments)]
+fn fold_lens(
+    label: &str,
+    scores: &[f32],
+    n: usize,
+    combine: &str,
+    detail: &mut [Vec<serde_json::Value>],
+    rank_lists: &mut Vec<Vec<usize>>,
+    fused: &mut [f32],
+) {
+    let mut rank_of = vec![0usize; n];
+    for (r, &i) in argsort_desc(scores).iter().enumerate() {
+        rank_of[i] = r;
+    }
+    for (i, d) in detail.iter_mut().enumerate() {
+        d.push(serde_json::json!({
+            "scope": label,
+            "rank": rank_of[i],
+            "cosine": (scores[i] * 1e4).round() / 1e4,
+        }));
+        match combine {
+            "max" => fused[i] = fused[i].max(scores[i]),
+            "mean" => fused[i] += scores[i],
+            _ => {}
+        }
+    }
+    rank_lists.push(rank_of);
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -349,9 +380,6 @@ async fn main() -> Result<()> {
             top,
             json,
         } => {
-            if cli.surface == "code" {
-                eprintln!("note: ask uses the readme surface (code not supported for ask yet)");
-            }
             let (scopes, query) = plan_scopes(&client, planner, text).await?;
             let projects = corpus::discover(&root)?;
             if projects.is_empty() {
@@ -364,47 +392,76 @@ async fn main() -> Result<()> {
                 scopes.len()
             );
 
+            let use_readme = cli.surface != "code";
+            let use_code = cli.surface != "readme";
             let mut fused = vec![0.0f32; n];
             let mut per_scope_detail: Vec<Vec<serde_json::Value>> = vec![Vec::new(); n];
             let mut rank_lists: Vec<Vec<usize>> = Vec::new();
-            for instr in &scopes {
-                let doc_inputs: Vec<String> = projects
-                    .iter()
-                    .map(|p| corpus::format_input(instr, &p.readme))
-                    .collect();
-                let docs =
-                    embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs)
-                        .await?;
-                let qv = embed_texts(
+
+            if use_readme {
+                for instr in &scopes {
+                    let doc_inputs: Vec<String> = projects
+                        .iter()
+                        .map(|p| corpus::format_input(instr, &p.readme))
+                        .collect();
+                    let docs =
+                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs)
+                            .await?;
+                    let qv = embed_texts(
+                        &client,
+                        &mut cache,
+                        &cli.model,
+                        cli.dimensions,
+                        &[corpus::format_input(instr, &query)],
+                    )
+                    .await?;
+                    let s = cosine_scores(&docs, &qv[0]);
+                    fold_lens(
+                        instr,
+                        &s,
+                        n,
+                        combine,
+                        &mut per_scope_detail,
+                        &mut rank_lists,
+                        &mut fused,
+                    );
+                }
+            }
+            if use_code {
+                let (c_docs, capped, codeless) = embed_code(
                     &client,
                     &mut cache,
-                    &cli.model,
+                    &cli.code_model,
                     cli.dimensions,
-                    &[corpus::format_input(instr, &query)],
+                    &projects,
                 )
                 .await?;
-                let scores = cosine_scores(&docs, &qv[0]);
-                let order = argsort_desc(&scores);
-                let mut rank_of = vec![0usize; n];
-                for (r, &i) in order.iter().enumerate() {
-                    rank_of[i] = r;
-                }
-                for i in 0..n {
-                    per_scope_detail[i].push(serde_json::json!({
-                        "scope": instr,
-                        "rank": rank_of[i],
-                        "cosine": (scores[i] * 1e4).round() / 1e4,
-                    }));
-                    match combine.as_str() {
-                        "max" => fused[i] = fused[i].max(scores[i]),
-                        "mean" => fused[i] += scores[i] / scopes.len() as f32,
-                        _ => {}
-                    }
-                }
-                rank_lists.push(rank_of);
+                eprintln!("code lens · {capped} capped / {codeless} codeless");
+                let c_q = embed_texts(
+                    &client,
+                    &mut cache,
+                    &cli.code_model,
+                    cli.dimensions,
+                    std::slice::from_ref(&query),
+                )
+                .await?;
+                let s = cosine_scores(&c_docs, &c_q[0]);
+                fold_lens(
+                    "<code>",
+                    &s,
+                    n,
+                    combine,
+                    &mut per_scope_detail,
+                    &mut rank_lists,
+                    &mut fused,
+                );
             }
-            if combine == "rrf" {
-                fused = rrf_fuse(&rank_lists, n);
+
+            let lens_count = rank_lists.len().max(1) as f32;
+            match combine.as_str() {
+                "rrf" => fused = rrf_fuse(&rank_lists, n),
+                "mean" => fused.iter_mut().for_each(|f| *f /= lens_count),
+                _ => {}
             }
 
             let order = argsort_desc(&fused);
@@ -429,8 +486,13 @@ async fn main() -> Result<()> {
                 );
             } else {
                 eprintln!("Q: {text}");
-                for s in &scopes {
-                    eprintln!("  lens: {s}");
+                if use_readme {
+                    for s in &scopes {
+                        eprintln!("  lens: {s}");
+                    }
+                }
+                if use_code {
+                    eprintln!("  lens: <code>");
                 }
                 for &i in order.iter().take(*top) {
                     println!("  {:.4}  {}", fused[i], names[i]);
