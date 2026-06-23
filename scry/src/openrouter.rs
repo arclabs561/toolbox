@@ -147,4 +147,34 @@ impl Client {
             .map(|c| c.message.content)
             .ok_or_else(|| anyhow!("chat response had no choices"))
     }
+
+    /// Free-form chat completion (no JSON constraint). Returns message content.
+    pub async fn chat(&self, model: &str, system: &str, user: &str) -> Result<String> {
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0,
+        });
+        let resp: ChatResp = self
+            .http
+            .post(CHAT_URL)
+            .bearer_auth(&self.key)
+            .header("X-Title", "scry")
+            .json(&body)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .context("chat request failed")?
+            .json()
+            .await
+            .context("decode chat response")?;
+        resp.choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.content)
+            .ok_or_else(|| anyhow!("chat response had no choices"))
+    }
 }

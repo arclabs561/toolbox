@@ -49,10 +49,17 @@ scry query "approximate nearest neighbor search" \
     --scope "the search/indexing technique this project implements" --top 8
 scry query "tools that talk to an LLM" --json
 
-# ask: a planner LLM derives the scope(s) + query, then fuses (dual-LLM)
+# ask: plan scope(s) -> retrieve -> RRF-fuse; --answer synthesizes a cited reply
 scry ask "which projects could help build code search" --top 6
-scry ask "tools for ranking LLM outputs" --json
+scry ask "tools for ranking LLM outputs" --answer
 scry --surface both ask "which projects implement vector search"  # +code lens
+
+# overlap: near-duplicate / overlapping projects (high pairwise cosine)
+scry overlap --threshold 0.8
+
+# mcp: run as an MCP stdio server so an agent host calls scry_query / scry_ask
+scry mcp
+scry --github BurntSushi mcp        # serve a remote corpus
 
 # code surface: embed source files instead of READMEs (for cluster + query)
 scry --surface code query "lock-free ring buffer"

@@ -4,8 +4,8 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use scry::{
     argsort_desc, cache::Cache, cluster_labels, concat_normalized, corpus, cosine_scores,
-    embed_code, embed_texts, github, medoid_labels, openrouter::Client, plan_scopes, ranks_desc,
-    rrf_fuse,
+    embed_code, embed_texts, github, l2_normalize, medoid_labels, openrouter::Client, plan_scopes,
+    ranks_desc, rrf_fuse,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -96,10 +96,29 @@ enum Cmd {
         combine: String,
         #[arg(long, default_value_t = 10)]
         top: usize,
+        /// Synthesize an answer from the top hits (an LLM reads their text).
+        #[arg(long)]
+        answer: bool,
         /// Emit JSON for agentic use.
         #[arg(long)]
         json: bool,
     },
+    /// Find near-duplicate / overlapping projects (high pairwise cosine).
+    Overlap {
+        /// Named scope or free-text instruction lens.
+        #[arg(long, default_value = "purpose")]
+        scope: String,
+        /// Minimum cosine to report a pair.
+        #[arg(long, default_value_t = 0.80)]
+        threshold: f32,
+        /// Max pairs to report.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run as an MCP server over stdio (exposes query/ask/overlap to agents).
+    Mcp,
 }
 
 /// Parse the cluster `--scopes` spec into `(name, instruction)` pairs.
@@ -425,6 +444,7 @@ async fn main() -> Result<()> {
             planner,
             combine,
             top,
+            answer,
             json,
         } => {
             let (scopes, query) = plan_scopes(&client, planner, text).await?;
@@ -519,12 +539,40 @@ async fn main() -> Result<()> {
                     })
                 })
                 .collect();
+            // Optional synthesis: an LLM reads the top hits' text and answers,
+            // citing project names. Turns retrieval into question-answering.
+            let synthesized = if *answer {
+                let ctx: String = order
+                    .iter()
+                    .take(*top)
+                    .map(|&i| {
+                        let snip: String = projects[i].readme.chars().take(1500).collect();
+                        format!("## {}\n{snip}", names[i])
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                let sys = "Answer the user's question about a collection of software \
+                    projects using ONLY the provided summaries. Cite project names in \
+                    backticks. Be concise (a few sentences). If none fit, say so.";
+                Some(
+                    client
+                        .chat(
+                            planner,
+                            sys,
+                            &format!("Question: {text}\n\nProjects:\n{ctx}"),
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
+
             if *json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "question": text, "plan": { "scopes": scopes, "query": query },
-                        "combine": combine, "results": results,
+                        "combine": combine, "answer": synthesized, "results": results,
                     })
                 );
             } else {
@@ -540,8 +588,63 @@ async fn main() -> Result<()> {
                 for &i in order.iter().take(*top) {
                     println!("  {:.4}  {}", fused[i], names[i]);
                 }
+                if let Some(a) = &synthesized {
+                    println!("\n{a}");
+                }
             }
             eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+        }
+
+        Cmd::Overlap {
+            scope,
+            threshold,
+            top,
+            json,
+        } => {
+            let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
+            let instr = corpus::resolve_scope(scope);
+            let inputs: Vec<String> = projects
+                .iter()
+                .map(|p| corpus::format_input(&instr, &p.readme))
+                .collect();
+            let mat = embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs).await?;
+            let norm: Vec<Vec<f32>> = mat.iter().map(|v| l2_normalize(v)).collect();
+            let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
+            for i in 0..norm.len() {
+                for j in (i + 1)..norm.len() {
+                    let s: f32 = norm[i].iter().zip(&norm[j]).map(|(a, b)| a * b).sum();
+                    if s >= *threshold {
+                        pairs.push((s, i, j));
+                    }
+                }
+            }
+            pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+            pairs.truncate(*top);
+            if *json {
+                let arr: Vec<_> = pairs
+                    .iter()
+                    .map(|(s, i, j)| {
+                        serde_json::json!({"a": names[*i], "b": names[*j], "score": (s * 1e4).round() / 1e4})
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({"scope": instr, "threshold": threshold, "pairs": arr})
+                );
+            } else {
+                eprintln!("overlap (scope {instr:?}, threshold {threshold})");
+                if pairs.is_empty() {
+                    eprintln!("  no pairs above threshold");
+                }
+                for (s, i, j) in &pairs {
+                    println!("  {:.4}  {} ~ {}", s, names[*i], names[*j]);
+                }
+            }
+            eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+        }
+
+        Cmd::Mcp => {
+            scry::mcp::serve(&projects, &client, &mut cache, &cli.model, cli.dimensions).await?;
         }
     }
     Ok(())
