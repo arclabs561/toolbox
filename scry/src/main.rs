@@ -117,6 +117,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Evaluate retrieval against a probes file (`expected<TAB>query` per line).
+    Eval {
+        /// Probes TSV; lines `expected<TAB>query`, `#` comments allowed.
+        file: PathBuf,
+        /// Named scope or free-text instruction lens.
+        #[arg(long, default_value = "purpose")]
+        scope: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run as an MCP server over stdio (exposes query/ask/overlap to agents).
     Mcp,
 }
@@ -638,6 +648,82 @@ async fn main() -> Result<()> {
                 }
                 for (s, i, j) in &pairs {
                     println!("  {:.4}  {} ~ {}", s, names[*i], names[*j]);
+                }
+            }
+            eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+        }
+
+        Cmd::Eval { file, scope, json } => {
+            let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
+            let instr = corpus::resolve_scope(scope);
+            let inputs: Vec<String> = projects
+                .iter()
+                .map(|p| corpus::format_input(&instr, &p.readme))
+                .collect();
+            let docs =
+                embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs).await?;
+            let content = std::fs::read_to_string(file)?;
+            let probes: Vec<(String, String)> = content
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .filter_map(|l| {
+                    l.split_once('\t')
+                        .map(|(e, q)| (e.trim().to_string(), q.trim().to_string()))
+                })
+                .collect();
+            if probes.is_empty() {
+                bail!("no probes in {}", file.display());
+            }
+            let qinputs: Vec<String> = probes
+                .iter()
+                .map(|(_, q)| corpus::format_input(&instr, q))
+                .collect();
+            let qv = embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &qinputs).await?;
+            let ranks: Vec<(String, Option<usize>)> = probes
+                .iter()
+                .enumerate()
+                .map(|(idx, (expected, _))| {
+                    let scores = cosine_scores(&docs, &qv[idx]);
+                    let rank = argsort_desc(&scores)
+                        .iter()
+                        .position(|&i| names[i] == *expected)
+                        .map(|p| p + 1);
+                    (expected.clone(), rank)
+                })
+                .collect();
+            let n = probes.len();
+            let nf = n as f64;
+            let top1 = ranks.iter().filter(|(_, r)| *r == Some(1)).count();
+            let top3 = ranks
+                .iter()
+                .filter(|(_, r)| r.is_some_and(|r| r <= 3))
+                .count();
+            let mrr: f64 = ranks
+                .iter()
+                .filter_map(|(_, r)| r.map(|r| 1.0 / r as f64))
+                .sum::<f64>()
+                / nf;
+            if *json {
+                let per: Vec<_> = ranks
+                    .iter()
+                    .map(|(e, r)| serde_json::json!({ "expected": e, "rank": r }))
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({ "scope": instr, "n": n, "top1": top1, "top3": top3, "mrr": mrr, "probes": per })
+                );
+            } else {
+                eprintln!("eval (scope {instr:?}, n={n})");
+                println!(
+                    "top-1 {top1}/{n} ({:.0}%)  top-3 {top3}/{n} ({:.0}%)  MRR {mrr:.3}",
+                    100.0 * top1 as f64 / nf,
+                    100.0 * top3 as f64 / nf
+                );
+                for (e, r) in &ranks {
+                    if r.is_none_or(|r| r > 3) {
+                        println!("  miss: {e} (rank {r:?})");
+                    }
                 }
             }
             eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);

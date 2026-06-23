@@ -57,6 +57,9 @@ scry --surface both ask "which projects implement vector search"  # +code lens
 # overlap: near-duplicate / overlapping projects (high pairwise cosine)
 scry overlap --threshold 0.8
 
+# eval: retrieval accuracy against a probes file (expected<TAB>query lines)
+scry eval tests/probes.tsv          # top-1 / top-3 / MRR over labeled probes
+
 # mcp: run as an MCP stdio server so an agent host calls scry_query / scry_ask
 scry mcp
 scry --github BurntSushi mcp        # serve a remote corpus
