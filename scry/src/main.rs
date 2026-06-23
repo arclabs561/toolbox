@@ -22,7 +22,16 @@ struct Cli {
     /// Use a GitHub user's public repos as the corpus instead of a local dir.
     #[arg(long, global = true)]
     github: Option<String>,
-    /// Include forks when using --github (default: owned, non-fork only).
+    /// Use a GitHub org's repos as the corpus.
+    #[arg(long, global = true)]
+    github_org: Option<String>,
+    /// Use a GitHub user's starred repos as the corpus.
+    #[arg(long, global = true)]
+    stars: Option<String>,
+    /// Use an explicit comma-separated `owner/name` list as the corpus.
+    #[arg(long, global = true)]
+    repos: Option<String>,
+    /// Include forks for --github/--github-org (default: owned, non-fork only).
     #[arg(long, global = true)]
     include_forks: bool,
     /// Re-fetch the --github corpus, bypassing the per-user disk cache.
@@ -192,17 +201,33 @@ async fn main() -> Result<()> {
     let client = Client::from_env()?.with_provider(cli.provider.clone());
     let mut cache = Cache::load(Cache::default_path());
 
-    // The code/both surfaces need a local source tree; the github source is
+    // The code/both surfaces need a local source tree; remote sources are
     // readme/metadata only.
-    if cli.github.is_some() && cli.surface != "readme" {
+    let remote = cli.github.is_some()
+        || cli.github_org.is_some()
+        || cli.stars.is_some()
+        || cli.repos.is_some();
+    if remote && cli.surface != "readme" {
         bail!(
-            "--surface {} needs a local source; the --github source is readme-only",
+            "--surface {} needs a local source; remote (--github*/--stars/--repos) is readme-only",
             cli.surface
         );
     }
-    let projects = match &cli.github {
-        Some(user) => github::fetch_user(user, cli.include_forks, cli.refresh).await?,
-        None => corpus::discover(&root)?,
+    let projects = if let Some(user) = &cli.github {
+        github::fetch_user(user, cli.include_forks, cli.refresh).await?
+    } else if let Some(org) = &cli.github_org {
+        github::fetch_org(org, cli.include_forks, cli.refresh).await?
+    } else if let Some(user) = &cli.stars {
+        github::fetch_stars(user, cli.refresh).await?
+    } else if let Some(list) = &cli.repos {
+        let names: Vec<String> = list
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        github::fetch_named(&names, cli.refresh).await?
+    } else {
+        corpus::discover(&root)?
     };
     if projects.is_empty() {
         bail!("no projects found");
