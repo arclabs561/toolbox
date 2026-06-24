@@ -356,6 +356,93 @@ pub async fn plan_scopes(
     Ok((scopes, query))
 }
 
+/// Result of the [`ask`] flow.
+pub struct AskResult {
+    pub scopes: Vec<String>,
+    pub query: String,
+    /// Top projects with fused scores, best first.
+    pub ranked: Vec<(String, f32)>,
+    /// Synthesized answer (only when `synthesize`).
+    pub answer: Option<String>,
+}
+
+/// The full ask flow: a planner derives scope lenses, each retrieves, rankings
+/// are RRF-fused, and (optionally) an LLM synthesizes an answer over the top
+/// hits. Shared by the `ask` command, the MCP `scry_ask` tool, and the eval.
+#[allow(clippy::too_many_arguments)]
+pub async fn ask(
+    client: &Client,
+    cache: &mut Cache,
+    model: &str,
+    dimensions: Option<u32>,
+    planner: &str,
+    projects: &[Project],
+    question: &str,
+    top: usize,
+    synthesize: bool,
+) -> Result<AskResult> {
+    let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
+    let n = names.len();
+    let (scopes, query) = plan_scopes(client, planner, question).await?;
+
+    let mut rank_lists: Vec<Vec<usize>> = Vec::new();
+    for instr in &scopes {
+        let inputs: Vec<String> = projects
+            .iter()
+            .map(|p| corpus::format_input(instr, &p.readme))
+            .collect();
+        let docs = embed_texts(client, cache, model, dimensions, &inputs).await?;
+        let qv = embed_texts(
+            client,
+            cache,
+            model,
+            dimensions,
+            &[corpus::format_input(instr, &query)],
+        )
+        .await?;
+        rank_lists.push(ranks_desc(&cosine_scores(&docs, &qv[0])));
+    }
+    let fused = rrf_fuse(&rank_lists, n);
+    let order = argsort_desc(&fused);
+    let ranked: Vec<(String, f32)> = order
+        .iter()
+        .take(top)
+        .map(|&i| (names[i].clone(), fused[i]))
+        .collect();
+
+    let answer = if synthesize {
+        let ctx: String = order
+            .iter()
+            .take(top)
+            .map(|&i| {
+                let snip: String = projects[i].readme.chars().take(1500).collect();
+                format!("## {}\n{snip}", names[i])
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let sys = "Answer the user's question about a collection of software projects using \
+            ONLY the provided summaries. Cite project names in backticks. Be concise. If none \
+            fit, say so.";
+        Some(
+            client
+                .chat(
+                    planner,
+                    sys,
+                    &format!("Question: {question}\n\nProjects:\n{ctx}"),
+                )
+                .await?,
+        )
+    } else {
+        None
+    };
+    Ok(AskResult {
+        scopes,
+        query,
+        ranked,
+        answer,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

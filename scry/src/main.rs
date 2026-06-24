@@ -124,6 +124,9 @@ enum Cmd {
         /// Named scope or free-text instruction lens.
         #[arg(long, default_value = "purpose")]
         scope: String,
+        /// Evaluate `ask` answer quality (cited + grounded) instead of retrieval.
+        #[arg(long)]
+        answer: bool,
         #[arg(long)]
         json: bool,
     },
@@ -144,6 +147,15 @@ fn parse_scopes(spec: &str) -> Result<Vec<(String, String)>> {
         }
     }
     Ok(out)
+}
+
+/// Lowercased tokens inside backticks (an answer's citations).
+fn backtick_tokens(s: &str) -> Vec<String> {
+    s.split('`')
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, t)| t.trim().to_lowercase())
+        .collect()
 }
 
 /// Cluster one matrix, print the groups under `title`, and return the JSON.
@@ -653,15 +665,13 @@ async fn main() -> Result<()> {
             eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
         }
 
-        Cmd::Eval { file, scope, json } => {
+        Cmd::Eval {
+            file,
+            scope,
+            answer,
+            json,
+        } => {
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
-            let instr = corpus::resolve_scope(scope);
-            let inputs: Vec<String> = projects
-                .iter()
-                .map(|p| corpus::format_input(&instr, &p.readme))
-                .collect();
-            let docs =
-                embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs).await?;
             let content = std::fs::read_to_string(file)?;
             let probes: Vec<(String, String)> = content
                 .lines()
@@ -675,6 +685,71 @@ async fn main() -> Result<()> {
             if probes.is_empty() {
                 bail!("no probes in {}", file.display());
             }
+
+            if *answer {
+                // Answer-quality eval: run the ask flow per probe and check, from
+                // the synthesized answer's backtick citations, whether it named the
+                // expected project (cited) and whether every cited project is one it
+                // actually retrieved (grounded = no invented projects).
+                let mut detail: Vec<(String, bool, bool)> = Vec::new();
+                for (expected, question) in &probes {
+                    let res = scry::ask(
+                        &client,
+                        &mut cache,
+                        &cli.model,
+                        cli.dimensions,
+                        "openai/gpt-4o-mini",
+                        &projects,
+                        question,
+                        8,
+                        true,
+                    )
+                    .await?;
+                    let toks = backtick_tokens(&res.answer.unwrap_or_default());
+                    let cited = toks.contains(&expected.to_lowercase());
+                    let grounded = res
+                        .ranked
+                        .iter()
+                        .any(|(nm, _)| toks.contains(&nm.to_lowercase()));
+                    detail.push((expected.clone(), cited, grounded));
+                }
+                let n = probes.len();
+                let nf = n as f64;
+                let cited = detail.iter().filter(|(_, c, _)| *c).count();
+                let grounded = detail.iter().filter(|(_, _, g)| *g).count();
+                if *json {
+                    let per: Vec<_> = detail
+                        .iter()
+                        .map(|(e, c, g)| serde_json::json!({ "expected": e, "cited": c, "grounded": g }))
+                        .collect();
+                    println!(
+                        "{}",
+                        serde_json::json!({ "n": n, "cited": cited, "grounded": grounded, "probes": per })
+                    );
+                } else {
+                    eprintln!("ask eval (n={n})");
+                    println!(
+                        "cited {cited}/{n} ({:.0}%)  grounded {grounded}/{n} ({:.0}%)",
+                        100.0 * cited as f64 / nf,
+                        100.0 * grounded as f64 / nf
+                    );
+                    for (e, c, g) in &detail {
+                        if !c {
+                            println!("  not cited: {e} (grounded={g})");
+                        }
+                    }
+                }
+                eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+                return Ok(());
+            }
+
+            let instr = corpus::resolve_scope(scope);
+            let inputs: Vec<String> = projects
+                .iter()
+                .map(|p| corpus::format_input(&instr, &p.readme))
+                .collect();
+            let docs =
+                embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs).await?;
             let qinputs: Vec<String> = probes
                 .iter()
                 .map(|(_, q)| corpus::format_input(&instr, q))
