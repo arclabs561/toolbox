@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
+use futures::stream::StreamExt;
 use scry::{
     argsort_desc, cache::Cache, cluster_labels, concat_normalized, corpus, cosine_scores,
     embed_code, embed_texts, github, l2_normalize, medoid_labels, openrouter::Client, plan_scopes,
@@ -240,7 +241,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = cli.root.clone().unwrap_or_else(corpus::default_root);
     let client = Client::from_env()?.with_provider(cli.provider.clone());
-    let mut cache = Cache::load(Cache::default_path());
+    let cache = Cache::load(Cache::default_path());
 
     // The code/both surfaces need a local source tree; remote sources are
     // readme/metadata only.
@@ -280,14 +281,8 @@ async fn main() -> Result<()> {
             let mut clusters_json = serde_json::Map::new();
 
             if cli.surface == "code" {
-                let (mat, capped, codeless) = embed_code(
-                    &client,
-                    &mut cache,
-                    &cli.code_model,
-                    cli.dimensions,
-                    &projects,
-                )
-                .await?;
+                let (mat, capped, codeless) =
+                    embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects).await?;
                 eprintln!(
                     "{} projects · surface=code · model={} · {capped} capped / {codeless} codeless",
                     projects.len(),
@@ -301,14 +296,9 @@ async fn main() -> Result<()> {
                 let scopes = parse_scopes(scopes)?;
                 // For `both`, embed code once and concatenate it onto each scope.
                 let code_mat = if cli.surface == "both" {
-                    let (m, capped, codeless) = embed_code(
-                        &client,
-                        &mut cache,
-                        &cli.code_model,
-                        cli.dimensions,
-                        &projects,
-                    )
-                    .await?;
+                    let (m, capped, codeless) =
+                        embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
+                            .await?;
                     eprintln!("surface=both · code {capped} capped / {codeless} codeless");
                     Some(m)
                 } else {
@@ -326,8 +316,7 @@ async fn main() -> Result<()> {
                         .map(|p| corpus::format_input(instr, &p.readme))
                         .collect();
                     let r_mat =
-                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs)
-                            .await?;
+                        embed_texts(&client, &cache, &cli.model, cli.dimensions, &inputs).await?;
                     let (mat, title) = match &code_mat {
                         Some(c) => (concat_normalized(&r_mat, c), format!("scope+code: {name}")),
                         None => (r_mat, format!("scope: {name}")),
@@ -342,8 +331,8 @@ async fn main() -> Result<()> {
             )?;
             eprintln!(
                 "\ncache: {} hit / {} miss · wrote {}/clusters.json",
-                cache.hits,
-                cache.misses,
+                cache.hits(),
+                cache.misses(),
                 out.display()
             );
         }
@@ -357,21 +346,16 @@ async fn main() -> Result<()> {
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
             let (scores, scope_label) = match cli.surface.as_str() {
                 "code" => {
-                    let (docs, capped, codeless) = embed_code(
-                        &client,
-                        &mut cache,
-                        &cli.code_model,
-                        cli.dimensions,
-                        &projects,
-                    )
-                    .await?;
+                    let (docs, capped, codeless) =
+                        embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
+                            .await?;
                     eprintln!(
                         "surface=code · model={} · {capped} capped / {codeless} codeless",
                         cli.code_model
                     );
                     let qv = embed_texts(
                         &client,
-                        &mut cache,
+                        &cache,
                         &cli.code_model,
                         cli.dimensions,
                         std::slice::from_ref(text),
@@ -386,28 +370,22 @@ async fn main() -> Result<()> {
                         .map(|p| corpus::format_input(&instr, &p.readme))
                         .collect();
                     let r_docs =
-                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &r_inputs)
-                            .await?;
+                        embed_texts(&client, &cache, &cli.model, cli.dimensions, &r_inputs).await?;
                     let r_q = embed_texts(
                         &client,
-                        &mut cache,
+                        &cache,
                         &cli.model,
                         cli.dimensions,
                         &[corpus::format_input(&instr, text)],
                     )
                     .await?;
-                    let (c_docs, capped, codeless) = embed_code(
-                        &client,
-                        &mut cache,
-                        &cli.code_model,
-                        cli.dimensions,
-                        &projects,
-                    )
-                    .await?;
+                    let (c_docs, capped, codeless) =
+                        embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
+                            .await?;
                     eprintln!("surface=both · code {capped} capped / {codeless} codeless");
                     let c_q = embed_texts(
                         &client,
-                        &mut cache,
+                        &cache,
                         &cli.code_model,
                         cli.dimensions,
                         std::slice::from_ref(text),
@@ -427,11 +405,11 @@ async fn main() -> Result<()> {
                         .map(|p| corpus::format_input(&instr, &p.readme))
                         .collect();
                     let docs =
-                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs)
+                        embed_texts(&client, &cache, &cli.model, cli.dimensions, &doc_inputs)
                             .await?;
                     let qv = embed_texts(
                         &client,
-                        &mut cache,
+                        &cache,
                         &cli.model,
                         cli.dimensions,
                         &[corpus::format_input(&instr, text)],
@@ -458,7 +436,7 @@ async fn main() -> Result<()> {
                     println!("  {:.4}  {}", scores[i], names[i]);
                 }
             }
-            eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+            eprintln!("cache: {} hit / {} miss", cache.hits(), cache.misses());
         }
 
         Cmd::Ask {
@@ -490,11 +468,11 @@ async fn main() -> Result<()> {
                         .map(|p| corpus::format_input(instr, &p.readme))
                         .collect();
                     let docs =
-                        embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &doc_inputs)
+                        embed_texts(&client, &cache, &cli.model, cli.dimensions, &doc_inputs)
                             .await?;
                     let qv = embed_texts(
                         &client,
-                        &mut cache,
+                        &cache,
                         &cli.model,
                         cli.dimensions,
                         &[corpus::format_input(instr, &query)],
@@ -513,18 +491,12 @@ async fn main() -> Result<()> {
                 }
             }
             if use_code {
-                let (c_docs, capped, codeless) = embed_code(
-                    &client,
-                    &mut cache,
-                    &cli.code_model,
-                    cli.dimensions,
-                    &projects,
-                )
-                .await?;
+                let (c_docs, capped, codeless) =
+                    embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects).await?;
                 eprintln!("code lens · {capped} capped / {codeless} codeless");
                 let c_q = embed_texts(
                     &client,
-                    &mut cache,
+                    &cache,
                     &cli.code_model,
                     cli.dimensions,
                     std::slice::from_ref(&query),
@@ -614,7 +586,7 @@ async fn main() -> Result<()> {
                     println!("\n{a}");
                 }
             }
-            eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+            eprintln!("cache: {} hit / {} miss", cache.hits(), cache.misses());
         }
 
         Cmd::Overlap {
@@ -629,7 +601,7 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|p| corpus::format_input(&instr, &p.readme))
                 .collect();
-            let mat = embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs).await?;
+            let mat = embed_texts(&client, &cache, &cli.model, cli.dimensions, &inputs).await?;
             let norm: Vec<Vec<f32>> = mat.iter().map(|v| l2_normalize(v)).collect();
             let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
             for i in 0..norm.len() {
@@ -662,7 +634,7 @@ async fn main() -> Result<()> {
                     println!("  {:.4}  {} ~ {}", s, names[*i], names[*j]);
                 }
             }
-            eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+            eprintln!("cache: {} hit / {} miss", cache.hits(), cache.misses());
         }
 
         Cmd::Eval {
@@ -691,28 +663,39 @@ async fn main() -> Result<()> {
                 // the synthesized answer's backtick citations, whether it named the
                 // expected project (cited) and whether every cited project is one it
                 // actually retrieved (grounded = no invented projects).
-                let mut detail: Vec<(String, bool, bool)> = Vec::new();
-                for (expected, question) in &probes {
-                    let res = scry::ask(
-                        &client,
-                        &mut cache,
-                        &cli.model,
-                        cli.dimensions,
-                        "openai/gpt-4o-mini",
-                        &projects,
-                        question,
-                        8,
-                        true,
-                    )
-                    .await?;
-                    let toks = backtick_tokens(&res.answer.unwrap_or_default());
-                    let cited = toks.contains(&expected.to_lowercase());
-                    let grounded = res
-                        .ranked
-                        .iter()
-                        .any(|(nm, _)| toks.contains(&nm.to_lowercase()));
-                    detail.push((expected.clone(), cited, grounded));
-                }
+                // Probes run concurrently (bounded); the shared &Cache is
+                // interior-mutable so the ask flows don't serialize on it.
+                let detail: Vec<(String, bool, bool)> = futures::stream::iter(probes.iter())
+                    .map(|(expected, question)| {
+                        let (client, cache, projects, model, dims) =
+                            (&client, &cache, &projects, &cli.model, cli.dimensions);
+                        async move {
+                            let res = scry::ask(
+                                client,
+                                cache,
+                                model,
+                                dims,
+                                "openai/gpt-4o-mini",
+                                projects,
+                                question,
+                                8,
+                                true,
+                            )
+                            .await?;
+                            let toks = backtick_tokens(&res.answer.unwrap_or_default());
+                            let cited = toks.contains(&expected.to_lowercase());
+                            let grounded = res
+                                .ranked
+                                .iter()
+                                .any(|(nm, _)| toks.contains(&nm.to_lowercase()));
+                            anyhow::Ok((expected.clone(), cited, grounded))
+                        }
+                    })
+                    .buffered(6)
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
                 let n = probes.len();
                 let nf = n as f64;
                 let cited = detail.iter().filter(|(_, c, _)| *c).count();
@@ -739,7 +722,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+                eprintln!("cache: {} hit / {} miss", cache.hits(), cache.misses());
                 return Ok(());
             }
 
@@ -748,13 +731,12 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|p| corpus::format_input(&instr, &p.readme))
                 .collect();
-            let docs =
-                embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &inputs).await?;
+            let docs = embed_texts(&client, &cache, &cli.model, cli.dimensions, &inputs).await?;
             let qinputs: Vec<String> = probes
                 .iter()
                 .map(|(_, q)| corpus::format_input(&instr, q))
                 .collect();
-            let qv = embed_texts(&client, &mut cache, &cli.model, cli.dimensions, &qinputs).await?;
+            let qv = embed_texts(&client, &cache, &cli.model, cli.dimensions, &qinputs).await?;
             let ranks: Vec<(String, Option<usize>)> = probes
                 .iter()
                 .enumerate()
@@ -801,11 +783,11 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            eprintln!("cache: {} hit / {} miss", cache.hits, cache.misses);
+            eprintln!("cache: {} hit / {} miss", cache.hits(), cache.misses());
         }
 
         Cmd::Mcp => {
-            scry::mcp::serve(&projects, &client, &mut cache, &cli.model, cli.dimensions).await?;
+            scry::mcp::serve(&projects, &client, &cache, &cli.model, cli.dimensions).await?;
         }
     }
     Ok(())

@@ -45,7 +45,7 @@ pub const RRF_K: f32 = 60.0;
 /// cost nothing, and it is saved once after the misses resolve.
 pub async fn embed_texts(
     client: &Client,
-    cache: &mut Cache,
+    cache: &Cache,
     model: &str,
     dimensions: Option<u32>,
     texts: &[String],
@@ -55,14 +55,15 @@ pub async fn embed_texts(
         .iter()
         .map(|t| Cache::key(model, provider, dimensions, t))
         .collect();
-    let present = keys.iter().filter(|k| cache.map.contains_key(*k)).count();
-    cache.hits += present;
-    cache.misses += keys.len() - present;
+    let present = cache.contains_each(&keys);
+    let hits = present.iter().filter(|&&p| p).count();
+    cache.add_hits(hits);
+    cache.add_misses(keys.len() - hits);
 
     let mut miss_texts: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (t, k) in texts.iter().zip(&keys) {
-        if !cache.map.contains_key(k) && seen.insert(k.clone()) {
+    for ((t, k), p) in texts.iter().zip(&keys).zip(&present) {
+        if !*p && seen.insert(k.clone()) {
             miss_texts.push(t.clone());
         }
     }
@@ -80,9 +81,7 @@ pub async fn embed_texts(
         while let Some(res) = stream.next().await {
             let (batch, vecs) = res?;
             for (t, v) in batch.iter().zip(vecs) {
-                cache
-                    .map
-                    .insert(Cache::key(model, provider, dimensions, t), v);
+                cache.insert(Cache::key(model, provider, dimensions, t), v);
             }
             done += 1;
             if done.is_multiple_of(8) {
@@ -93,7 +92,7 @@ pub async fn embed_texts(
         cache.save().context("save cache")?;
     }
 
-    Ok(keys.iter().map(|k| cache.map[k].clone()).collect())
+    Ok(cache.get_each(&keys))
 }
 
 /// Read a file with a hard timeout, returning `None` on timeout or error so the
@@ -114,7 +113,7 @@ async fn read_file_bounded(path: std::path::PathBuf) -> Option<String> {
 /// at all (those get a zero vector and sort last / cluster as noise).
 pub async fn embed_code(
     client: &Client,
-    cache: &mut Cache,
+    cache: &Cache,
     model: &str,
     dimensions: Option<u32>,
     projects: &[Project],
@@ -372,7 +371,7 @@ pub struct AskResult {
 #[allow(clippy::too_many_arguments)]
 pub async fn ask(
     client: &Client,
-    cache: &mut Cache,
+    cache: &Cache,
     model: &str,
     dimensions: Option<u32>,
     planner: &str,

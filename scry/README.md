@@ -59,6 +59,7 @@ scry overlap --threshold 0.8
 
 # eval: retrieval accuracy against a probes file (expected<TAB>query lines)
 scry eval tests/probes.tsv          # top-1 / top-3 / MRR over labeled probes
+scry eval tests/probes.tsv --answer # ask-answer quality: cited + grounded rates
 
 # mcp: run as an MCP stdio server so an agent host calls scry_query / scry_ask
 scry mcp

@@ -21,7 +21,7 @@ const PLANNER: &str = "openai/gpt-4o-mini";
 pub async fn serve(
     projects: &[Project],
     client: &Client,
-    cache: &mut Cache,
+    cache: &Cache,
     model: &str,
     dims: Option<u32>,
 ) -> Result<()> {
@@ -97,7 +97,7 @@ async fn handle_call(
     projects: &[Project],
     names: &[String],
     client: &Client,
-    cache: &mut Cache,
+    cache: &Cache,
     model: &str,
     dims: Option<u32>,
 ) -> Value {
@@ -161,7 +161,7 @@ async fn query_tool(
     projects: &[Project],
     names: &[String],
     client: &Client,
-    cache: &mut Cache,
+    cache: &Cache,
     model: &str,
     dims: Option<u32>,
 ) -> Result<Value> {
@@ -196,7 +196,7 @@ async fn ask_tool(
     projects: &[Project],
     names: &[String],
     client: &Client,
-    cache: &mut Cache,
+    cache: &Cache,
     model: &str,
     dims: Option<u32>,
 ) -> Result<Value> {
