@@ -20,6 +20,7 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | [commit-survey](commit-survey/) | Survey a repo's commit and branch conventions |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
 | [ips](ips/) | Show local and public IP addresses |
+| [perplexity2md](perplexity2md/) | Convert Perplexity chat HTML to Markdown |
 | [reflow](reflow/) | Reflow Markdown text preserving code blocks |
 | [toks](toks/) | Count tokens (tiktoken) |
 | [trunk](trunk/) | Print the repo's default branch |
