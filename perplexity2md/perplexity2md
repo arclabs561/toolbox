@@ -14,6 +14,11 @@ Inline citation chips (span.citation) that wrap a real source URL become markdow
 links; collapsed "+N more sources" chips carry no recoverable URL and are dropped
 rather than leaked as glued label text. KaTeX math emits its TeX annotation.
 
+Newer Perplexity task pages sometimes omit the older user-turn markers while
+still exposing a stray div.prose answer. When no user turn is present, the
+converter falls back to the main document region, starts at the first answer
+h1, and strips Perplexity chrome before converting the answer blocks.
+
 Usage:
     pbpaste | perplexity2md              # clipboard to stdout
     pbpaste | perplexity2md -o convo.md  # clipboard to file
@@ -23,6 +28,7 @@ Usage:
 
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -61,6 +67,254 @@ def extract_turns(soup: BeautifulSoup) -> list[dict]:
             turns.append({"role": role, "content": md})
 
     return turns
+
+
+def extract_main_answer(soup: BeautifulSoup) -> str:
+    """Extract the answer body from newer Perplexity task-page DOM snapshots."""
+    for node in soup(["script", "style", "svg", "symbol", "path", "noscript", "template", "button"]):
+        node.decompose()
+
+    main = soup.find("main")
+    if main is None:
+        return ""
+
+    start = main.find("h1")
+    if start is None:
+        return ""
+
+    block_names = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "ul", "ol", "pre", "blockquote", "table"}
+    blocks: list[str] = []
+    started = False
+    for tag in main.find_all(list(block_names), recursive=True):
+        if tag is start:
+            started = True
+        if not started:
+            continue
+        if _has_block_parent(tag, stop_at=main, block_names=block_names):
+            continue
+
+        md = _main_block_to_markdown(tag).strip()
+        if md:
+            blocks.append(md)
+
+    if not blocks:
+        return ""
+
+    return _reflow_markdown("\n\n".join(blocks).strip() + "\n")
+
+
+def _has_block_parent(tag: Tag, stop_at: Tag, block_names: set[str]) -> bool:
+    parent = tag.parent
+    while isinstance(parent, Tag) and parent is not stop_at:
+        if parent.name in block_names and parent.name != "blockquote":
+            return True
+        parent = parent.parent
+    return False
+
+
+def _main_block_to_markdown(tag: Tag) -> str:
+    if tag.name and re.fullmatch(r"h[1-6]", tag.name):
+        level = int(tag.name[1])
+        return f"{'#' * level} {_clean_inline(_main_inline_to_markdown(tag)).strip()}"
+
+    if tag.name == "p":
+        return _clean_inline(_main_inline_to_markdown(tag)).strip()
+
+    if tag.name in ("ul", "ol"):
+        return _main_list_to_markdown(tag)
+
+    if tag.name == "pre":
+        code_el = tag.select_one("code")
+        code_tag = code_el or tag
+        lang = ""
+        for cls in code_tag.get("class", []):
+            if cls.startswith("language-"):
+                lang = cls[len("language-") :]
+                break
+        code = code_tag.get_text("", strip=False).rstrip("\n")
+        return f"```{lang}\n{code}\n```"
+
+    if tag.name == "blockquote":
+        text = _clean_inline(_main_inline_to_markdown(tag)).strip()
+        return "\n".join(f"> {line}" if line else ">" for line in text.split("\n"))
+
+    if tag.name == "table":
+        parts: list[str] = []
+        _convert_table(tag, parts)
+        return "".join(parts).strip()
+
+    return ""
+
+
+def _main_list_to_markdown(tag: Tag, depth: int = 0) -> str:
+    lines: list[str] = []
+    ordered = tag.name == "ol"
+    index = 1
+    for li in tag.find_all("li", recursive=False):
+        nested_lists = [child for child in li.children if isinstance(child, Tag) and child.name in ("ul", "ol")]
+        for nested in nested_lists:
+            nested.extract()
+
+        body = _clean_inline(_main_inline_to_markdown(li)).strip()
+        if body:
+            prefix = f"{index}. " if ordered else "- "
+            indent = "  " * depth
+            body_lines = body.split("\n")
+            lines.append(indent + prefix + body_lines[0])
+            lines.extend(indent + " " * len(prefix) + line for line in body_lines[1:])
+            index += 1
+
+        for nested in nested_lists:
+            nested_md = _main_list_to_markdown(nested, depth + 1)
+            if nested_md:
+                lines.append(nested_md)
+            li.append(nested)
+
+    return "\n".join(lines)
+
+
+def _main_inline_to_markdown(el) -> str:
+    if isinstance(el, NavigableString):
+        return str(el)
+    if not isinstance(el, Tag):
+        return ""
+
+    tag = el.name
+    classes = el.get("class", [])
+
+    if "sr-only" in classes:
+        return ""
+    if tag in ("button", "svg", "style", "script", "iframe", "noscript", "template"):
+        return ""
+    if el.get("role") == "status":
+        return ""
+    if el.get("aria-hidden") == "true" and tag == "span" and not el.get_text(strip=True):
+        return ""
+
+    if tag == "br":
+        return "\n"
+
+    if tag == "span" and "citation" in classes:
+        a = el.select_one("a[href]")
+        if a is not None:
+            href = a.get("href", "")
+            label = a.get_text(strip=True)
+            if href and label:
+                return f"[{label}]({href})"
+        return ""
+
+    if tag == "span" and "katex-display" in classes:
+        tex = _katex_tex(el)
+        return f"\n\n$$\n{tex}\n$$\n\n" if tex else ""
+    if tag == "span" and "katex" in classes:
+        tex = _katex_tex(el)
+        return f"${tex}$" if tex else ""
+
+    if tag == "code":
+        text = el.get_text("", strip=False)
+        ticks = "`"
+        if "`" in text:
+            longest = max(len(match.group(0)) for match in re.finditer(r"`+", text))
+            ticks = "`" * (longest + 1)
+        return f"{ticks}{text}{ticks}"
+
+    children = "".join(_main_inline_to_markdown(child) for child in el.children)
+    children = _clean_inline(children)
+
+    if tag in ("strong", "b") and children.strip():
+        return f"**{children.strip()}**"
+    if tag in ("em", "i") and children.strip():
+        return f"*{children.strip()}*"
+    if tag == "a":
+        href = el.get("href", "")
+        label = children.strip() or el.get_text(" ", strip=True)
+        if href and label:
+            return f"[{label}]({href})"
+        return label
+
+    return children
+
+
+def _clean_inline(text: str) -> str:
+    text = text.replace("\xa0", " ")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n +", "\n", text)
+    return text
+
+
+def _reflow_markdown(md: str, width: int = 88) -> str:
+    blocks = md.strip().split("\n\n")
+    wrapped: list[str] = []
+    for block in blocks:
+        lines = block.split("\n")
+        if _is_markdown_structure_block(block, lines):
+            wrapped.append(block)
+            continue
+
+        if all(re.match(r"^(?:- |\d+\. )", line) for line in lines if line.strip()):
+            wrapped.append(_reflow_list_block(lines, width))
+            continue
+
+        if len(lines) == 1:
+            wrapped.append(_fill_markdown_prose(block, width))
+        else:
+            wrapped.append(block)
+
+    return "\n\n".join(wrapped).strip() + "\n"
+
+
+def _is_markdown_structure_block(block: str, lines: list[str]) -> bool:
+    return (
+        block.startswith("#")
+        or block.startswith("```")
+        or block.startswith(">")
+        or block.startswith("| ")
+        or all(line.startswith(("  - ", "  1. ")) for line in lines if line.strip())
+    )
+
+
+def _reflow_list_block(lines: list[str], width: int) -> str:
+    out: list[str] = []
+    for line in lines:
+        match = re.match(r"^(- |\d+\. )(.*)$", line)
+        if match is None:
+            out.append(line)
+            continue
+
+        prefix, body = match.groups()
+        out.append(
+            _fill_markdown_prose(
+                body,
+                width,
+                initial_indent=prefix,
+                subsequent_indent=" " * len(prefix),
+            )
+        )
+    return "\n".join(out)
+
+
+def _fill_markdown_prose(text: str, width: int, initial_indent: str = "", subsequent_indent: str = "") -> str:
+    protected: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        protected.append(match.group(0))
+        return f"\x00{len(protected) - 1}\x00"
+
+    # Keep inline code spans intact while wrapping surrounding prose.
+    placeholder_text = re.sub(r"(`+)(.+?)\1", protect, text)
+    filled = textwrap.fill(
+        placeholder_text,
+        width=width,
+        initial_indent=initial_indent,
+        subsequent_indent=subsequent_indent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+    def restore(match: re.Match[str]) -> str:
+        return protected[int(match.group(1))]
+
+    return re.sub(r"\x00(\d+)\x00", restore, filled)
 
 
 def _html_to_markdown(el: Tag) -> str:
@@ -176,17 +430,17 @@ def _walk(el, parts: list, depth: int):
             for li in child.children:
                 if isinstance(li, Tag) and li.name == "li":
                     indent = "  " * depth
-                    parts.append(f"{indent}{counter['n']}. ")
-                    _walk(li, parts, depth + 1)
-                    parts.append("\n")
+                    body = _list_item_markdown(li, depth + 1)
+                    if body:
+                        parts.append(f"{indent}{counter['n']}. {body}\n")
                     counter["n"] += 1
             parts.append("\n")
 
         elif tag == "li" and child.parent and child.parent.name == "ul":
             indent = "  " * (depth - 1)
-            parts.append(f"{indent}- ")
-            _walk(child, parts, depth)
-            parts.append("\n")
+            body = _list_item_markdown(child, depth)
+            if body:
+                parts.append(f"{indent}- {body}\n")
 
         elif tag == "a":
             href = child.get("href", "")
@@ -215,6 +469,15 @@ def _walk(el, parts: list, depth: int):
 
         else:
             _walk(child, parts, depth)
+
+
+def _list_item_markdown(li: Tag, depth: int) -> str:
+    item_parts: list[str] = []
+    _walk(li, item_parts, depth)
+    body = "".join(item_parts).strip()
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    body = re.sub(r"^\n+", "", body)
+    return body
 
 
 def _katex_tex(el: Tag) -> str:
@@ -286,16 +549,28 @@ def main():
 
     soup = BeautifulSoup(html, "html.parser")
     turns = extract_turns(soup)
+    has_user_turn = any(turn["role"] == "user" for turn in turns)
+    if turns and has_user_turn:
+        md = turns_to_markdown(turns)
+        item_count = f"{len(turns)} turns"
+    else:
+        md = extract_main_answer(soup)
+        item_count = "main answer"
+        if not md.strip() and turns:
+            if has_user_turn:
+                md = turns_to_markdown(turns)
+                item_count = f"{len(turns)} turns"
+            else:
+                md = "\n\n".join(turn["content"] for turn in turns).strip() + "\n"
+                item_count = "assistant answer"
 
-    if not turns:
-        print("Error: no conversation turns found", file=sys.stderr)
+    if not md.strip():
+        print("Error: no conversation turns or main answer found", file=sys.stderr)
         sys.exit(1)
-
-    md = turns_to_markdown(turns)
 
     if args.output:
         Path(args.output).write_text(md)
-        print(f"Wrote {len(turns)} turns to {args.output}", file=sys.stderr)
+        print(f"Wrote {item_count} to {args.output}", file=sys.stderr)
     else:
         print(md)
 
