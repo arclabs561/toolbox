@@ -1,0 +1,1241 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["playwright"]
+# ///
+"""Explore and export Perplexity chats with a persistent Playwright session.
+
+This is a browser automation fallback for Perplexity's web app. It keeps a
+separate Chromium profile so login cookies and IndexedDB state survive across
+runs, and can keep one headless browser process alive behind a local Unix socket
+for repeated `ask`, `explore`, and `export` commands.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from playwright.sync_api import BrowserContext, Page, sync_playwright
+
+APP = "perplexity-export"
+BASE_URL = "https://www.perplexity.ai"
+LIBRARY_URL = f"{BASE_URL}/library"
+DEFAULT_OP_ITEM = "Perplexity"
+DEFAULT_TTL_SECONDS = 45 * 60
+DEFAULT_WAIT_SECONDS = 8
+DEFAULT_ASSET_LIMIT = 250
+DEFAULT_MAX_ASSET_MB = 25
+MANUAL_VERIFICATION_MESSAGE = (
+    "Perplexity security verification is blocking access. Complete it in the persistent "
+    "Playwright profile with `perplexity-export verify --headed`, then retry this command. "
+    "Headless mode will not click challenges."
+)
+
+
+def xdg_path(env_name: str, fallback: str) -> Path:
+    return Path(os.environ.get(env_name, str(Path.home() / fallback))).expanduser()
+
+
+DATA_DIR = xdg_path("XDG_DATA_HOME", ".local/share") / APP
+CACHE_DIR = xdg_path("XDG_CACHE_HOME", ".cache") / APP
+STATE_DIR = xdg_path("XDG_STATE_HOME", ".local/state") / APP
+PROFILE_DIR = DATA_DIR / "profile"
+DEFAULT_EXPORT_DIR = Path.home() / "Downloads" / APP
+SOCKET_PATH = CACHE_DIR / "control.sock"
+PID_PATH = STATE_DIR / "daemon.pid"
+LOG_PATH = STATE_DIR / "daemon.log"
+
+
+class ToolError(RuntimeError):
+    pass
+
+
+class VerificationRequired(ToolError):
+    pass
+
+
+@dataclass
+class OpLogin:
+    username: str | None = None
+    password: str | None = None
+
+
+def ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(PermissionError):
+        path.chmod(0o700)
+
+
+def slugify(text: str, fallback: str = "perplexity") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text.strip().lower()).strip("-")
+    return slug[:80] or fallback
+
+
+def parse_duration(value: str) -> int:
+    match = re.fullmatch(r"\s*(\d+)\s*([smhd]?)\s*", value)
+    if not match:
+        raise argparse.ArgumentTypeError(f"invalid duration: {value}")
+    amount = int(match.group(1))
+    unit = match.group(2) or "s"
+    factors = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    return amount * factors[unit]
+
+
+def parse_selection(selection: str, total: int) -> list[int]:
+    picked: set[int] = set()
+    for part in re.split(r"[,\s]+", selection.strip()):
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            if not start_s.isdigit() or not end_s.isdigit():
+                raise ToolError(f"bad selection range: {part}")
+            start, end = int(start_s), int(end_s)
+            if start > end:
+                start, end = end, start
+            picked.update(range(start, end + 1))
+        elif part.isdigit():
+            picked.add(int(part))
+        else:
+            raise ToolError(f"bad selection token: {part}")
+
+    bad = [i for i in picked if i < 1 or i > total]
+    if bad:
+        raise ToolError(f"selection out of range: {bad[0]}")
+    return sorted(i - 1 for i in picked)
+
+
+def op_binary() -> str:
+    for candidate in ("/opt/homebrew/bin/op", "/usr/local/bin/op", shutil.which("op")):
+        if candidate and Path(candidate).exists():
+            return candidate
+    raise ToolError("1Password CLI not found on PATH")
+
+
+def op_command_prefix() -> list[str]:
+    cmd = [op_binary()]
+    if config_dir := os.environ.get("OP_CONFIG_DIR"):
+        cmd.extend(["--config", str(Path(config_dir).expanduser())])
+    return cmd
+
+
+def read_op_login(item: str, vault: str | None, timeout: int = 20) -> OpLogin:
+    cmd = [
+        *op_command_prefix(),
+        "item",
+        "get",
+        item,
+        "--reveal",
+        "--format",
+        "json",
+    ]
+    if vault:
+        cmd.extend(["--vault", vault])
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ToolError("op timed out; unlock 1Password or run `op signin` in a terminal") from exc
+
+    if proc.returncode != 0:
+        # `--reveal` can put credentials in stdout. Never echo partial stdout
+        # from a failed invocation into a terminal or log.
+        detail = proc.stderr.strip() or f"exit {proc.returncode}"
+        raise ToolError(f"op could not read item {item!r}: {detail}")
+
+    return parse_op_fields(proc.stdout)
+
+
+def parse_op_fields(raw: str) -> OpLogin:
+    data = json.loads(raw)
+    fields: list[dict[str, Any]]
+    if isinstance(data, list):
+        fields = [field for field in data if isinstance(field, dict)]
+    elif isinstance(data, dict) and isinstance(data.get("fields"), list):
+        fields = [field for field in data["fields"] if isinstance(field, dict)]
+    elif isinstance(data, dict):
+        fields = [data]
+    else:
+        fields = []
+
+    username = None
+    password = None
+    for field in fields:
+        label = str(field.get("label") or field.get("id") or "").lower()
+        field_type = str(field.get("type") or "").lower()
+        value = field.get("value")
+        if not isinstance(value, str) or not value:
+            continue
+        if password is None and ("password" in label or field_type == "concealed"):
+            password = value
+        if username is None and (label in {"username", "email"} or "email" in label):
+            username = value
+
+    return OpLogin(username=username, password=password)
+
+
+def launch_context(pw: Any, *, headless: bool, slow_mo: int = 0) -> BrowserContext:
+    ensure_private_dir(DATA_DIR)
+    ensure_private_dir(PROFILE_DIR)
+    legacy_state = DATA_DIR / "storage-state.json"
+    if legacy_state.exists():
+        with contextlib.suppress(PermissionError):
+            legacy_state.chmod(0o600)
+    options: dict[str, Any] = {
+        "headless": headless,
+        "slow_mo": slow_mo,
+        "accept_downloads": True,
+        "viewport": {"width": 1440, "height": 950},
+    }
+    if headless:
+        # Use the real Chromium build in new-headless mode. Playwright's default
+        # headless shell is easier for bot checks to fingerprint.
+        options["channel"] = "chromium"
+    return pw.chromium.launch_persistent_context(
+        str(PROFILE_DIR),
+        **options,
+    )
+
+
+def first_page(context: BrowserContext) -> Page:
+    if context.pages:
+        return context.pages[0]
+    return context.new_page()
+
+
+def goto(page: Page, url: str, wait: float = 1.0) -> None:
+    target = normalize_url(url)
+    page.goto(target, wait_until="domcontentloaded", timeout=45_000)
+    page.wait_for_timeout(int(wait * 1000))
+
+
+def normalize_url(url: str) -> str:
+    if url.startswith(("http://", "https://")):
+        return url
+    if url.startswith("/"):
+        return BASE_URL + url
+    return url
+
+
+def is_perplexity_url(url: str) -> bool:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (
+        hostname == "perplexity.ai" or hostname.endswith(".perplexity.ai")
+    )
+
+
+def page_snapshot(page: Page) -> dict[str, Any]:
+    return {
+        "url": page.url,
+        "title": page.title(),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def is_security_verification(page: Page) -> bool:
+    title = page.title().strip().lower()
+    if title == "just a moment...":
+        return True
+    try:
+        text = page.locator("body").inner_text(timeout=1_000).lower()
+    except Exception:
+        return False
+    markers = (
+        "performing security verification",
+        "verify you are human",
+        "cloudflare",
+        "security service to protect against malicious bots",
+    )
+    return any(marker in text for marker in markers)
+
+
+def require_not_security_verification(page: Page) -> None:
+    if is_security_verification(page):
+        raise VerificationRequired(MANUAL_VERIFICATION_MESSAGE)
+
+
+def fill_login_from_op(page: Page, login: OpLogin) -> None:
+    click_first(page, ["text=/sign\\s*in/i", "text=/log\\s*in/i"], timeout_ms=2_000)
+
+    if login.username:
+        fill_first(
+            page,
+            [
+                "input[type='email']",
+                "input[name*='email' i]",
+                "input[autocomplete='username']",
+                "input[placeholder*='email' i]",
+                "input[type='text']",
+            ],
+            login.username,
+            timeout_ms=3_000,
+        )
+
+    if login.password:
+        fill_first(
+            page,
+            ["input[type='password']", "input[autocomplete='current-password']"],
+            login.password,
+            timeout_ms=2_000,
+        )
+
+
+def click_first(page: Page, selectors: list[str], timeout_ms: int = 1_500) -> bool:
+    for selector in selectors:
+        loc = page.locator(selector).first
+        try:
+            if loc.count() > 0:
+                loc.click(timeout=timeout_ms)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def fill_first(page: Page, selectors: list[str], value: str, timeout_ms: int = 1_500) -> bool:
+    for selector in selectors:
+        loc = page.locator(selector).first
+        try:
+            if loc.count() > 0:
+                loc.fill(value, timeout=timeout_ms)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def auth_command(args: argparse.Namespace) -> None:
+    if daemon_running():
+        raise ToolError(
+            "daemon is using the persistent profile; run `perplexity-export stop` first"
+        )
+
+    login: OpLogin | None = None
+    if args.op_item:
+        try:
+            login = read_op_login(args.op_item, args.op_vault)
+            print(f"read 1Password item: {args.op_item}")
+        except ToolError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+            print("continuing with manual login", file=sys.stderr)
+
+    with sync_playwright() as pw:
+        context = launch_context(pw, headless=False, slow_mo=args.slow_mo)
+        page = first_page(context)
+        goto(page, args.url, wait=1)
+
+        if login:
+            fill_login_from_op(page, login)
+
+        print("Finish login in the browser, then press Enter here.")
+        input()
+        context.close()
+
+    print(f"profile saved: {PROFILE_DIR}")
+
+
+def verify_command(args: argparse.Namespace) -> None:
+    if not args.headed:
+        ensure_daemon(ttl=args.ttl, wait=args.wait, url=args.url, headed=False)
+        response = send_request({"action": "goto", "url": args.url, "wait": args.wait})
+        print(json.dumps(response, indent=2))
+        return
+
+    if daemon_running():
+        send_request({"action": "stop"})
+
+    login: OpLogin | None = None
+    if args.op_item:
+        try:
+            login = read_op_login(args.op_item, args.op_vault)
+            print(f"read 1Password item: {args.op_item}")
+        except ToolError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+            print("continuing with manual verification", file=sys.stderr)
+
+    with sync_playwright() as pw:
+        context = launch_context(pw, headless=False, slow_mo=args.slow_mo)
+        page = first_page(context)
+        goto(page, args.url, wait=1)
+
+        if login:
+            fill_login_from_op(page, login)
+
+        print("Complete Perplexity verification/login in the browser, then press Enter here.")
+        input()
+        context.close()
+
+    print(f"profile verified: {PROFILE_DIR}")
+
+
+def see_command(args: argparse.Namespace) -> None:
+    if daemon_running():
+        raise ToolError(
+            "daemon is using the persistent profile; run `perplexity-export stop` before `see`"
+        )
+
+    with sync_playwright() as pw:
+        context = launch_context(pw, headless=False, slow_mo=args.slow_mo)
+        page = first_page(context)
+        goto(page, args.url, wait=1)
+        print("Browser is open. Press Enter here to close it.")
+        input()
+        context.close()
+
+
+def scroll_page(page: Page, rounds: int = 12, pause_ms: int = 700) -> None:
+    last_height = 0
+    stable_rounds = 0
+    for _ in range(rounds):
+        height = page.evaluate("() => document.documentElement.scrollHeight")
+        page.evaluate("() => window.scrollTo(0, document.documentElement.scrollHeight)")
+        page.wait_for_timeout(pause_ms)
+        if height == last_height:
+            stable_rounds += 1
+            if stable_rounds >= 2:
+                break
+        else:
+            stable_rounds = 0
+        last_height = height
+
+
+def explore_chats(page: Page, *, limit: int, scroll: bool = True) -> list[dict[str, Any]]:
+    if not is_perplexity_url(page.url):
+        goto(page, LIBRARY_URL, wait=2)
+    if scroll:
+        scroll_page(page, rounds=18)
+
+    chats = page.evaluate(
+        """(limit) => {
+            const out = [];
+            const seen = new Set();
+            const candidates = Array.from(document.querySelectorAll('a[href]'));
+            const wanted = (url, text) => {
+                if (url.hostname !== 'perplexity.ai' && !url.hostname.endsWith('.perplexity.ai')) {
+                    return false;
+                }
+                const path = url.pathname;
+                if (path === '/' || path === '/library' || path === '/discover') return false;
+                if (/\\/(search|thread|conversation|page)\\//.test(path)) return true;
+                if (/^\\/spaces\\//.test(path) && text.length > 4) return true;
+                return text.length > 20 && !/sign in|log in|upgrade|settings/i.test(text);
+            };
+            for (const a of candidates) {
+                const text = (a.innerText || a.textContent || '').replace(/\\s+/g, ' ').trim();
+                let url;
+                try { url = new URL(a.href, location.href); } catch { continue; }
+                url.hash = '';
+                const href = url.toString();
+                if (seen.has(href) || !wanted(url, text)) continue;
+                seen.add(href);
+                out.push({
+                    title: text.slice(0, 180) || url.pathname,
+                    url: href,
+                    path: url.pathname,
+                });
+                if (out.length >= limit) break;
+            }
+            return out;
+        }""",
+        limit,
+    )
+    return list(chats)
+
+
+def print_chats(chats: list[dict[str, Any]]) -> None:
+    if not chats:
+        print("No candidate chats found. Try `perplexity-export see` to inspect the UI.")
+        return
+    for index, chat in enumerate(chats, start=1):
+        print(f"{index:3d}. {chat['title']}")
+        print(f"     {chat['url']}")
+
+
+def choose_chats(chats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    print_chats(chats)
+    if not chats:
+        return []
+    print()
+    print("Export which chats? Enter `all`, numbers/ranges like `1,4-6`, or blank for none.")
+    answer = input("> ").strip()
+    if not answer:
+        return []
+    if answer.lower() == "all":
+        return chats
+    picked = parse_selection(answer, len(chats))
+    return [chats[i] for i in picked]
+
+
+def ask_on_page(page: Page, prompt: str, wait_seconds: int) -> dict[str, Any]:
+    if not is_perplexity_url(page.url):
+        goto(page, BASE_URL, wait=2)
+
+    selectors = [
+        "textarea[placeholder*='Ask' i]",
+        "textarea",
+        "[contenteditable='true']",
+        "input[type='search']",
+        "input[type='text']",
+    ]
+    filled = False
+    for selector in selectors:
+        loc = page.locator(selector).first
+        try:
+            if loc.count() == 0:
+                continue
+            loc.click(timeout=2_000)
+            if selector == "[contenteditable='true']":
+                page.keyboard.insert_text(prompt)
+            else:
+                loc.fill(prompt, timeout=2_000)
+            filled = True
+            break
+        except Exception:
+            continue
+
+    if not filled:
+        raise ToolError("could not find a prompt input on the page")
+
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(wait_seconds * 1000)
+    return page_snapshot(page)
+
+
+def export_page(
+    page: Page,
+    *,
+    out_root: Path,
+    include_assets: bool,
+    asset_limit: int,
+    max_asset_mb: int,
+    wait_seconds: int,
+) -> dict[str, Any]:
+    page.wait_for_timeout(wait_seconds * 1000)
+    scroll_page(page, rounds=8)
+    html = page.content()
+    title = page.title() or "perplexity"
+    parsed = urlparse(page.url)
+    digest = hashlib.sha256(page.url.encode()).hexdigest()[:10]
+    export_dir = out_root / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{slugify(title)}-{digest}"
+    ensure_private_dir(export_dir)
+
+    html_path = export_dir / "page.html"
+    md_path = export_dir / "page.md"
+    meta_path = export_dir / "metadata.json"
+    shot_path = export_dir / "screenshot.png"
+    assets_dir = export_dir / "assets"
+
+    html_path.write_text(html, encoding="utf-8")
+    page.screenshot(path=str(shot_path), full_page=True)
+
+    markdown_result = convert_html_to_markdown(html)
+    if markdown_result:
+        md_path.write_text(markdown_result, encoding="utf-8")
+
+    assets: list[dict[str, Any]] = []
+    if include_assets:
+        ensure_private_dir(assets_dir)
+        assets = download_assets(page, assets_dir, limit=asset_limit, max_asset_mb=max_asset_mb)
+
+    meta = {
+        "title": title,
+        "url": page.url,
+        "origin": f"{parsed.scheme}://{parsed.netloc}",
+        "exported_at": datetime.now().isoformat(timespec="seconds"),
+        "html": str(html_path),
+        "markdown": str(md_path) if markdown_result else None,
+        "screenshot": str(shot_path),
+        "assets": assets,
+    }
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    return meta
+
+
+def convert_html_to_markdown(html: str) -> str | None:
+    converter = Path(__file__).resolve().parents[1] / "perplexity2md" / "perplexity2md"
+    if not converter.exists():
+        return None
+    proc = subprocess.run(
+        [str(converter)],
+        input=html,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def download_assets(
+    page: Page,
+    assets_dir: Path,
+    *,
+    limit: int,
+    max_asset_mb: int,
+) -> list[dict[str, Any]]:
+    urls = page.evaluate(
+        """(limit) => {
+            const urls = [];
+            const seen = new Set();
+            const add = (value) => {
+                if (!value) return;
+                let url;
+                try { url = new URL(value, location.href); } catch { return; }
+                if (!['http:', 'https:'].includes(url.protocol)) return;
+                url.hash = '';
+                const href = url.toString();
+                if (seen.has(href)) return;
+                seen.add(href);
+                urls.push(href);
+            };
+            for (const el of document.querySelectorAll('img[src], video[src], audio[src], source[src], track[src]')) {
+                add(el.getAttribute('src'));
+            }
+            for (const el of document.querySelectorAll('img[srcset], source[srcset]')) {
+                for (const candidate of el.getAttribute('srcset').split(',')) {
+                    add(candidate.trim().split(/\\s+/)[0]);
+                }
+            }
+            for (const el of document.querySelectorAll('link[href]')) {
+                const rel = (el.getAttribute('rel') || '').toLowerCase();
+                const as = (el.getAttribute('as') || '').toLowerCase();
+                if (rel.includes('stylesheet') || rel.includes('icon') || as === 'image') {
+                    add(el.getAttribute('href'));
+                }
+            }
+            for (const el of document.querySelectorAll('[style]')) {
+                const style = el.getAttribute('style') || '';
+                for (const match of style.matchAll(/url\\((['"]?)(.*?)\\1\\)/g)) {
+                    add(match[2]);
+                }
+            }
+            return urls.slice(0, limit);
+        }""",
+        limit,
+    )
+
+    results: list[dict[str, Any]] = []
+    max_bytes = max_asset_mb * 1024 * 1024
+    for url in urls:
+        result = fetch_asset_in_page(page, url, max_bytes=max_bytes)
+        if not result.get("ok"):
+            results.append({"url": url, "ok": False, "error": result.get("error", "fetch failed")})
+            continue
+
+        data = base64.b64decode(result["body"])
+        suffix = extension_for_asset(url, result.get("contentType"))
+        name = f"{len(results) + 1:04d}-{hashlib.sha256(url.encode()).hexdigest()[:12]}{suffix}"
+        path = assets_dir / name
+        path.write_bytes(data)
+        results.append(
+            {
+                "url": url,
+                "ok": True,
+                "path": str(path),
+                "bytes": len(data),
+                "content_type": result.get("contentType"),
+            }
+        )
+    return results
+
+
+def fetch_asset_in_page(page: Page, url: str, *, max_bytes: int) -> dict[str, Any]:
+    try:
+        return dict(
+            page.evaluate(
+                """async ({ url, maxBytes }) => {
+                    try {
+                        const res = await fetch(url, { credentials: 'include' });
+                        if (!res.ok) return { ok: false, error: `${res.status} ${res.statusText}` };
+                        const contentType = res.headers.get('content-type') || '';
+                        const buf = await res.arrayBuffer();
+                        if (buf.byteLength > maxBytes) {
+                            return { ok: false, error: `too large: ${buf.byteLength} bytes` };
+                        }
+                        let binary = '';
+                        const bytes = new Uint8Array(buf);
+                        const chunk = 0x8000;
+                        for (let i = 0; i < bytes.length; i += chunk) {
+                            binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+                        }
+                        return { ok: true, contentType, body: btoa(binary) };
+                    } catch (error) {
+                        return { ok: false, error: String(error && error.message ? error.message : error) };
+                    }
+                }""",
+                {"url": url, "maxBytes": max_bytes},
+            )
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def extension_for_asset(url: str, content_type: str | None) -> str:
+    path_suffix = Path(urlparse(url).path).suffix
+    if path_suffix and re.fullmatch(r"\.[a-zA-Z0-9]{1,8}", path_suffix):
+        return path_suffix
+    if not content_type:
+        return ".bin"
+    ctype = content_type.split(";", 1)[0].strip().lower()
+    mapping = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/svg+xml": ".svg",
+        "text/css": ".css",
+        "video/mp4": ".mp4",
+        "audio/mpeg": ".mp3",
+    }
+    return mapping.get(ctype, ".bin")
+
+
+def daemon_running() -> bool:
+    pid = read_pid()
+    return bool(pid and process_alive(pid) and SOCKET_PATH.exists())
+
+
+def read_pid() -> int | None:
+    try:
+        return int(PID_PATH.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def write_pid() -> None:
+    ensure_private_dir(STATE_DIR)
+    PID_PATH.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+
+def remove_pid() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        PID_PATH.unlink()
+
+
+def start_daemon(
+    *,
+    ttl: int,
+    wait: int,
+    url: str | None,
+    headed: bool,
+    announce: bool,
+) -> None:
+    if daemon_running():
+        if announce:
+            print(f"already running: pid {read_pid()} socket {SOCKET_PATH}")
+        return
+
+    ensure_private_dir(STATE_DIR)
+    ensure_private_dir(CACHE_DIR)
+    log = LOG_PATH.open("a", encoding="utf-8")
+    script = Path(__file__).resolve()
+    cmd = [
+        str(script),
+        "serve",
+        "--ttl",
+        f"{ttl}s",
+        "--wait",
+        str(wait),
+    ]
+    if headed:
+        cmd.append("--headed")
+    if url:
+        cmd.extend(["--url", url])
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log.close()
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        daemon_pid = read_pid()
+        pid_is_alive = bool(daemon_pid and process_alive(daemon_pid)) or process_alive(proc.pid)
+        if SOCKET_PATH.exists() and pid_is_alive:
+            if announce:
+                print(f"started: pid {daemon_pid or proc.pid} socket {SOCKET_PATH}")
+                print(f"log: {LOG_PATH}")
+            return
+        if proc.poll() is not None:
+            raise ToolError(f"daemon exited early; see {LOG_PATH}")
+        time.sleep(0.2)
+    raise ToolError(f"daemon did not create socket; see {LOG_PATH}")
+
+
+def start_command(args: argparse.Namespace) -> None:
+    start_daemon(
+        ttl=args.ttl,
+        wait=args.wait,
+        url=args.url,
+        headed=args.headed,
+        announce=True,
+    )
+
+
+def ensure_daemon(
+    *,
+    ttl: int = DEFAULT_TTL_SECONDS,
+    wait: int = DEFAULT_WAIT_SECONDS,
+    url: str | None = None,
+    headed: bool = False,
+) -> None:
+    start_daemon(ttl=ttl, wait=wait, url=url, headed=headed, announce=False)
+
+
+def serve_command(args: argparse.Namespace) -> None:
+    ensure_private_dir(CACHE_DIR)
+    ensure_private_dir(STATE_DIR)
+    if SOCKET_PATH.exists():
+        SOCKET_PATH.unlink()
+    write_pid()
+
+    started = time.monotonic()
+    last_activity = started
+    last_activity_wall = time.time()
+    stop = False
+
+    with sync_playwright() as pw:
+        context = launch_context(pw, headless=not args.headed)
+        page = first_page(context)
+        if args.url:
+            goto(page, args.url, wait=1)
+
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(SOCKET_PATH))
+        server.listen(8)
+        server.settimeout(1.0)
+        with contextlib.suppress(PermissionError):
+            SOCKET_PATH.chmod(0o600)
+
+        print(
+            json.dumps(
+                {
+                    "event": "ready",
+                    "pid": os.getpid(),
+                    "socket": str(SOCKET_PATH),
+                    "ttl_seconds": args.ttl,
+                }
+            ),
+            flush=True,
+        )
+
+        try:
+            while not stop:
+                if time.monotonic() - last_activity > args.ttl:
+                    break
+                try:
+                    conn, _ = server.accept()
+                except TimeoutError:
+                    continue
+
+                with conn:
+                    payload = conn.recv(10_000_000)
+                    if not payload:
+                        continue
+                    try:
+                        last_activity = time.monotonic()
+                        last_activity_wall = time.time()
+                        request = json.loads(payload.decode("utf-8"))
+                        response, stop = handle_daemon_request(
+                            request,
+                            context=context,
+                            page=page,
+                            started=started,
+                            ttl=args.ttl,
+                            last_activity=last_activity,
+                            last_activity_wall=last_activity_wall,
+                            default_wait=args.wait,
+                        )
+                    except VerificationRequired as exc:
+                        response = {
+                            "ok": False,
+                            "code": "verification_required",
+                            "error": str(exc),
+                        }
+                    except Exception as exc:
+                        response = {"ok": False, "error": str(exc)}
+                    conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
+        finally:
+            context.close()
+            server.close()
+            with contextlib.suppress(FileNotFoundError):
+                SOCKET_PATH.unlink()
+            remove_pid()
+
+
+def handle_daemon_request(
+    request: dict[str, Any],
+    *,
+    context: BrowserContext,
+    page: Page,
+    started: float,
+    ttl: int,
+    last_activity: float,
+    last_activity_wall: float,
+    default_wait: int,
+) -> tuple[dict[str, Any], bool]:
+    action = request.get("action")
+    stop = False
+
+    if action == "status":
+        response = {
+            "ok": True,
+            "pid": os.getpid(),
+            "uptime_seconds": round(time.monotonic() - started, 1),
+            "ttl_seconds": ttl,
+            "idle_remaining_seconds": max(0, round(ttl - (time.monotonic() - last_activity), 1)),
+            "last_activity_at": datetime.fromtimestamp(last_activity_wall).isoformat(
+                timespec="seconds"
+            ),
+            "pages": len(context.pages),
+            "page": page_snapshot(page),
+        }
+    elif action == "goto":
+        goto(page, str(request["url"]), wait=float(request.get("wait", 1)))
+        require_not_security_verification(page)
+        response = {"ok": True, "page": page_snapshot(page)}
+    elif action == "explore":
+        if request.get("url"):
+            goto(page, str(request["url"]), wait=2)
+        else:
+            goto(page, LIBRARY_URL, wait=2)
+        require_not_security_verification(page)
+        chats = explore_chats(page, limit=int(request.get("limit", 80)))
+        response = {"ok": True, "chats": chats}
+    elif action == "ask":
+        require_not_security_verification(page)
+        snapshot = ask_on_page(
+            page,
+            str(request["prompt"]),
+            wait_seconds=int(request.get("wait", default_wait)),
+        )
+        response = {"ok": True, "page": snapshot}
+    elif action == "export":
+        urls = list(request.get("urls") or [])
+        out_root = Path(request.get("out") or DEFAULT_EXPORT_DIR).expanduser()
+        ensure_private_dir(out_root)
+        metas = []
+        if urls:
+            for url in urls:
+                goto(page, str(url), wait=2)
+                require_not_security_verification(page)
+                metas.append(
+                    export_page(
+                        page,
+                        out_root=out_root,
+                        include_assets=bool(request.get("assets", True)),
+                        asset_limit=int(request.get("asset_limit", DEFAULT_ASSET_LIMIT)),
+                        max_asset_mb=int(request.get("max_asset_mb", DEFAULT_MAX_ASSET_MB)),
+                        wait_seconds=int(request.get("wait", default_wait)),
+                    )
+                )
+        else:
+            require_not_security_verification(page)
+            metas.append(
+                export_page(
+                    page,
+                    out_root=out_root,
+                    include_assets=bool(request.get("assets", True)),
+                    asset_limit=int(request.get("asset_limit", DEFAULT_ASSET_LIMIT)),
+                    max_asset_mb=int(request.get("max_asset_mb", DEFAULT_MAX_ASSET_MB)),
+                    wait_seconds=int(request.get("wait", default_wait)),
+                )
+            )
+        response = {"ok": True, "exports": metas}
+    elif action == "stop":
+        response = {"ok": True, "stopping": True}
+        stop = True
+    else:
+        raise ToolError(f"unknown daemon action: {action}")
+
+    return response, stop
+
+
+def send_request(request: dict[str, Any]) -> dict[str, Any]:
+    if not daemon_running():
+        raise ToolError("daemon is not running")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(120)
+    try:
+        client.connect(str(SOCKET_PATH))
+        client.sendall(json.dumps(request).encode("utf-8"))
+        chunks = []
+        while True:
+            chunk = client.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        client.close()
+    raw = b"".join(chunks).decode("utf-8")
+    response = json.loads(raw)
+    if not response.get("ok"):
+        if response.get("code") == "verification_required":
+            raise VerificationRequired(str(response.get("error", "verification required")))
+        raise ToolError(str(response.get("error", "daemon request failed")))
+    return response
+
+
+def status_command(_args: argparse.Namespace) -> None:
+    response = send_request({"action": "status"})
+    print(json.dumps(response, indent=2))
+
+
+def stop_command(_args: argparse.Namespace) -> None:
+    if daemon_running():
+        response = send_request({"action": "stop"})
+        print(json.dumps(response, indent=2))
+        return
+    pid = read_pid()
+    if pid:
+        print(f"not running (stale pid file: {pid})")
+        return
+    print("not running")
+
+
+def explore_command(args: argparse.Namespace) -> None:
+    ensure_daemon(ttl=args.ttl, wait=args.wait, headed=args.headed)
+    request = {"action": "explore", "limit": args.limit}
+    if args.url:
+        request["url"] = args.url
+
+    chats = list(send_request(request)["chats"])
+
+    if args.json:
+        print(json.dumps(chats, indent=2))
+    elif args.interactive:
+        selected = choose_chats(chats)
+        print(json.dumps(selected, indent=2))
+    else:
+        print_chats(chats)
+
+
+def ask_command(args: argparse.Namespace) -> None:
+    prompt = " ".join(args.prompt).strip()
+    if not prompt:
+        raise ToolError("prompt is required")
+    ensure_daemon(ttl=args.ttl, wait=args.wait, headed=args.headed)
+    response = send_request({"action": "ask", "prompt": prompt, "wait": args.wait})
+    print(json.dumps(response, indent=2))
+    if args.export:
+        export_response = send_request(
+            {
+                "action": "export",
+                "out": str(args.out),
+                "assets": not args.no_assets,
+                "asset_limit": args.asset_limit,
+                "max_asset_mb": args.max_asset_mb,
+                "wait": args.wait,
+            }
+        )
+        print(json.dumps(export_response, indent=2))
+
+
+def export_command(args: argparse.Namespace) -> None:
+    ensure_daemon(ttl=args.ttl, wait=args.wait, headed=args.headed)
+    urls = list(args.urls)
+    selection_mode = args.all or args.interactive
+    if args.all:
+        explore_response = send_request({"action": "explore", "limit": args.limit})
+        urls = [chat["url"] for chat in explore_response["chats"]]
+    elif args.interactive:
+        explore_response = send_request({"action": "explore", "limit": args.limit})
+        urls = [chat["url"] for chat in choose_chats(list(explore_response["chats"]))]
+
+    if selection_mode and not urls:
+        print("No chats selected; nothing exported.")
+        return
+
+    request = {
+        "action": "export",
+        "urls": urls,
+        "out": str(args.out),
+        "assets": not args.no_assets,
+        "asset_limit": args.asset_limit,
+        "max_asset_mb": args.max_asset_mb,
+        "wait": args.wait,
+    }
+    response = send_request(request)
+    print(json.dumps(response, indent=2))
+
+
+def add_common_export_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=DEFAULT_EXPORT_DIR,
+        help=f"export root directory (default: {DEFAULT_EXPORT_DIR})",
+    )
+    parser.add_argument(
+        "--no-assets", action="store_true", help="skip rendered-page asset downloads"
+    )
+    parser.add_argument("--asset-limit", type=int, default=DEFAULT_ASSET_LIMIT)
+    parser.add_argument("--max-asset-mb", type=int, default=DEFAULT_MAX_ASSET_MB)
+    parser.add_argument("--wait", type=int, default=DEFAULT_WAIT_SECONDS)
+
+
+def add_implied_daemon_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ttl",
+        type=parse_duration,
+        default=DEFAULT_TTL_SECONDS,
+        help="idle TTL for the implied headless daemon (default: 45m)",
+    )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="debug the implied daemon in a visible browser",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="perplexity-export",
+        description="Explore and export Perplexity chats with a persistent Playwright profile.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    auth = sub.add_parser(
+        "auth", help="open a headed browser and save the persistent login profile"
+    )
+    auth.add_argument("--url", default=BASE_URL)
+    auth.add_argument("--op-item", default=os.environ.get("PERPLEXITY_OP_ITEM", DEFAULT_OP_ITEM))
+    auth.add_argument("--op-vault", default=os.environ.get("PERPLEXITY_OP_VAULT"))
+    auth.add_argument("--slow-mo", type=int, default=0)
+    auth.set_defaults(func=auth_command)
+
+    verify = sub.add_parser("verify", help="probe Perplexity security verification state")
+    verify.add_argument("--url", default=LIBRARY_URL)
+    verify.add_argument("--op-item", default=os.environ.get("PERPLEXITY_OP_ITEM", DEFAULT_OP_ITEM))
+    verify.add_argument("--op-vault", default=os.environ.get("PERPLEXITY_OP_VAULT"))
+    verify.add_argument("--slow-mo", type=int, default=0)
+    verify.add_argument("--wait", type=int, default=DEFAULT_WAIT_SECONDS)
+    verify.add_argument("--ttl", type=parse_duration, default=DEFAULT_TTL_SECONDS)
+    verify.add_argument(
+        "--headed",
+        action="store_true",
+        help="open a visible browser for manual verification",
+    )
+    verify.set_defaults(func=verify_command)
+
+    start = sub.add_parser("start", help="start a background headless browser session")
+    start.add_argument("--ttl", type=parse_duration, default=DEFAULT_TTL_SECONDS)
+    start.add_argument("--wait", type=int, default=DEFAULT_WAIT_SECONDS)
+    start.add_argument("--url", default=LIBRARY_URL)
+    start.add_argument("--headed", action="store_true", help="keep a visible browser open")
+    start.set_defaults(func=start_command)
+
+    serve = sub.add_parser("serve", help=argparse.SUPPRESS)
+    serve.add_argument("--ttl", type=parse_duration, default=DEFAULT_TTL_SECONDS)
+    serve.add_argument("--wait", type=int, default=DEFAULT_WAIT_SECONDS)
+    serve.add_argument("--url")
+    serve.add_argument("--headed", action="store_true")
+    serve.set_defaults(func=serve_command)
+
+    status = sub.add_parser("status", help="show background session state")
+    status.set_defaults(func=status_command)
+
+    stop = sub.add_parser("stop", help="stop the background browser session")
+    stop.set_defaults(func=stop_command)
+
+    see = sub.add_parser("see", help="open the persistent profile in a visible browser")
+    see.add_argument("--url", default=LIBRARY_URL)
+    see.add_argument("--slow-mo", type=int, default=0)
+    see.set_defaults(func=see_command)
+
+    explore = sub.add_parser(
+        "explore", help="list candidate chats from Perplexity library/history UI"
+    )
+    explore.add_argument("--url", default=LIBRARY_URL)
+    explore.add_argument("--limit", type=int, default=80)
+    explore.add_argument("--wait", type=int, default=DEFAULT_WAIT_SECONDS)
+    explore.add_argument("--json", action="store_true")
+    explore.add_argument(
+        "-i", "--interactive", action="store_true", help="ask which chats to select"
+    )
+    add_implied_daemon_args(explore)
+    explore.set_defaults(func=explore_command)
+
+    ask = sub.add_parser("ask", help="submit a prompt through the sticky background session")
+    ask.add_argument("prompt", nargs="+")
+    ask.add_argument(
+        "--export", action="store_true", help="export the resulting page after waiting"
+    )
+    add_common_export_args(ask)
+    add_implied_daemon_args(ask)
+    ask.set_defaults(func=ask_command)
+
+    export = sub.add_parser(
+        "export", help="export current page, explicit URLs, or discovered chats"
+    )
+    export.add_argument("urls", nargs="*")
+    export.add_argument(
+        "--all", action="store_true", help="export every candidate discovered by explore"
+    )
+    export.add_argument(
+        "-i", "--interactive", action="store_true", help="ask which discovered chats to export"
+    )
+    export.add_argument("--limit", type=int, default=80)
+    add_common_export_args(export)
+    add_implied_daemon_args(export)
+    export.set_defaults(func=export_command)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return 130
+    except ToolError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as exc:
+        print(f"error: missing executable: {shlex.join([str(exc.filename)])}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

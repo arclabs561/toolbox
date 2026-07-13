@@ -14,6 +14,7 @@ extend-include = [
   "claude2md/claude2md",
   "chatgpt2md/chatgpt2md",
   "commit-survey/commit-survey",
+  "perplexity-export/perplexity-export",
 ]
 
 # `recorder` is a large standalone tool that landed separately and has not had a
