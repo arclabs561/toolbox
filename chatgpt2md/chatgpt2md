@@ -1,0 +1,314 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["beautifulsoup4"]
+# ///
+"""Convert ChatGPT conversation HTML (rendered DOM from clipboard) to Markdown.
+
+Usage:
+    pbpaste | chatgpt2md              # clipboard to stdout
+    pbpaste | chatgpt2md -o convo.md  # clipboard to file
+    chatgpt2md saved.html             # file arg
+    chatgpt2md saved.html -o out.md   # file to file
+"""
+
+import re
+import sys
+from pathlib import Path
+
+from bs4 import BeautifulSoup, NavigableString, Tag
+
+
+def extract_turns(soup: BeautifulSoup) -> list[dict]:
+    """Walk the document and yield visible user and assistant turns in order."""
+    turns = []
+
+    for el in soup.select("[data-message-author-role]"):
+        if el.find_parent(attrs={"data-message-author-role": True}):
+            continue
+
+        role = el.get("data-message-author-role")
+        if role not in {"user", "assistant"}:
+            continue
+
+        if role == "user":
+            content = el.select_one('[data-testid="collapsible-user-message-content"]') or el
+            md = _html_to_markdown(content)
+        else:
+            blocks = _top_level_markdown_blocks(el)
+            md = (
+                "\n\n".join(_html_to_markdown(block) for block in blocks)
+                if blocks
+                else _html_to_markdown(el)
+            )
+
+        if md.strip():
+            turns.append({"role": role, "content": md.strip()})
+
+    return turns
+
+
+def _top_level_markdown_blocks(el: Tag) -> list[Tag]:
+    blocks = []
+    for block in el.select(".markdown"):
+        parent = block.parent
+        nested = False
+        while isinstance(parent, Tag) and parent is not el:
+            if "markdown" in parent.get("class", []):
+                nested = True
+                break
+            parent = parent.parent
+        if not nested:
+            blocks.append(block)
+    return blocks
+
+
+def _html_to_markdown(el: Tag) -> str:
+    parts = []
+    _walk(el, parts, depth=0)
+    text = "".join(parts)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _walk(el, parts: list, depth: int):
+    for child in el.children:
+        if isinstance(child, NavigableString):
+            text = str(child)
+            if text.startswith("<!--"):
+                continue
+            parts.append(text)
+            continue
+
+        if not isinstance(child, Tag):
+            continue
+
+        tag = child.name
+        classes = child.get("class", [])
+
+        if child.has_attr("hidden") or child.get("aria-hidden") == "true":
+            continue
+        if any(name in classes for name in ("sr-only", "visually-hidden")):
+            continue
+        if tag in ("button", "svg", "style", "script", "iframe", "input", "label"):
+            continue
+        if child.get("role") == "status":
+            continue
+
+        if tag == "span" and "katex-display" in classes:
+            tex = _katex_tex(child)
+            if tex:
+                parts.append(f"\n\n$$\n{tex}\n$$\n\n")
+            continue
+        if tag == "span" and "katex" in classes:
+            tex = _katex_tex(child)
+            if tex:
+                parts.append(f"${tex}$")
+            continue
+
+        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            level = int(tag[1])
+            parts.append(f"\n\n{'#' * level} ")
+            _walk(child, parts, depth)
+            parts.append("\n\n")
+
+        elif tag == "p":
+            parts.append("\n\n")
+            _walk(child, parts, depth)
+            parts.append("\n\n")
+
+        elif tag in ("strong", "b"):
+            parts.append("**")
+            _walk(child, parts, depth)
+            parts.append("**")
+
+        elif tag in ("em", "i"):
+            parts.append("*")
+            _walk(child, parts, depth)
+            parts.append("*")
+
+        elif tag == "code" and (not child.parent or child.parent.name != "pre"):
+            parts.append("`")
+            parts.append(child.get_text())
+            parts.append("`")
+
+        elif tag == "pre":
+            _convert_pre(child, parts)
+
+        elif tag == "ul":
+            parts.append("\n")
+            _walk(child, parts, depth + 1)
+            parts.append("\n")
+
+        elif tag == "ol":
+            parts.append("\n")
+            counter = {"n": 1}
+            for li in child.children:
+                if isinstance(li, Tag) and li.name == "li":
+                    indent = "  " * depth
+                    parts.append(f"{indent}{counter['n']}. ")
+                    _walk(li, parts, depth + 1)
+                    parts.append("\n")
+                    counter["n"] += 1
+            parts.append("\n")
+
+        elif tag == "li" and child.parent and child.parent.name == "ul":
+            indent = "  " * (depth - 1)
+            parts.append(f"{indent}- ")
+            _walk(child, parts, depth)
+            parts.append("\n")
+
+        elif tag == "a":
+            href = child.get("href", "")
+            text_content = child.get_text(strip=True)
+            if href and text_content:
+                parts.append(f"[{text_content}]({href})")
+            else:
+                _walk(child, parts, depth)
+
+        elif tag == "img":
+            src = child.get("src", "")
+            alt = child.get("alt", "")
+            if src:
+                parts.append(f"![{alt}]({src})")
+
+        elif tag == "br":
+            parts.append("\n")
+
+        elif tag == "table":
+            _convert_table(child, parts)
+
+        elif tag == "blockquote":
+            bq_parts: list[str] = []
+            _walk(child, bq_parts, depth)
+            bq_text = "".join(bq_parts).strip()
+            for line in bq_text.split("\n"):
+                parts.append(f"> {line}\n")
+            parts.append("\n")
+
+        elif tag == "hr":
+            parts.append("\n\n---\n\n")
+
+        else:
+            _walk(child, parts, depth)
+
+
+def _convert_pre(pre: Tag, parts: list) -> None:
+    code_el = pre.select_one("code")
+    codemirror_el = pre.select_one(".cm-content")
+
+    if code_el:
+        code = code_el.get_text()
+    elif codemirror_el:
+        code = _text_with_breaks(codemirror_el)
+    else:
+        code = _text_with_breaks(pre)
+
+    language = _code_language(pre, code_el)
+    parts.append(f"\n\n```{language}\n")
+    parts.append(code.strip("\n"))
+    parts.append("\n```\n\n")
+
+
+def _code_language(pre: Tag, code_el: Tag | None) -> str:
+    if code_el:
+        for cls in code_el.get("class", []):
+            if cls.startswith("language-"):
+                return cls[len("language-") :]
+
+    header = pre.select_one('[data-testid="code-block-language"], .sticky')
+    if not header:
+        return ""
+
+    candidate = header.get_text(" ", strip=True).split(" ", 1)[0]
+    if candidate.lower() in {"copy", "code"}:
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9_+.#-]+", candidate):
+        return candidate.lower()
+    return ""
+
+
+def _text_with_breaks(el: Tag) -> str:
+    parts = []
+    for child in el.children:
+        if isinstance(child, NavigableString):
+            parts.append(str(child))
+        elif isinstance(child, Tag):
+            if child.name == "br":
+                parts.append("\n")
+            elif child.name not in ("button", "svg"):
+                parts.append(_text_with_breaks(child))
+    return "".join(parts)
+
+
+def _katex_tex(el: Tag) -> str:
+    """Pull the clean TeX source out of a KaTeX span's MathML annotation."""
+    ann = el.select_one('annotation[encoding="application/x-tex"]')
+    return ann.get_text().strip() if ann else ""
+
+
+def _convert_table(table: Tag, parts: list) -> None:
+    rows = []
+    for tr in table.select("tr"):
+        cells = []
+        for td in tr.select("th, td"):
+            cells.append(td.get_text(strip=True))
+        if cells:
+            rows.append(cells)
+
+    if not rows:
+        return
+
+    ncols = max(len(row) for row in rows)
+    for row in rows:
+        while len(row) < ncols:
+            row.append("")
+
+    parts.append("\n\n")
+    parts.append("| " + " | ".join(rows[0]) + " |\n")
+    parts.append("| " + " | ".join("---" for _ in rows[0]) + " |\n")
+    for row in rows[1:]:
+        parts.append("| " + " | ".join(row) + " |\n")
+    parts.append("\n")
+
+
+def turns_to_markdown(turns: list[dict]) -> str:
+    parts = []
+    for turn in turns:
+        heading = "User" if turn["role"] == "user" else "ChatGPT"
+        parts.append(f"## {heading}\n\n{turn['content']}\n\n")
+    return "".join(parts).strip() + "\n"
+
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Convert ChatGPT HTML to Markdown")
+    parser.add_argument("input", nargs="?", help="Input HTML file (default: stdin)")
+    parser.add_argument("-o", "--output", help="Output file (default: stdout)")
+    args = parser.parse_args()
+
+    html = Path(args.input).read_text() if args.input else sys.stdin.read()
+
+    if not html.strip():
+        print("Error: empty input", file=sys.stderr)
+        sys.exit(1)
+
+    soup = BeautifulSoup(html, "html.parser")
+    turns = extract_turns(soup)
+
+    if not turns:
+        print("Error: no conversation turns found", file=sys.stderr)
+        sys.exit(1)
+
+    md = turns_to_markdown(turns)
+
+    if args.output:
+        Path(args.output).write_text(md)
+        print(f"Wrote {len(turns)} turns to {args.output}", file=sys.stderr)
+    else:
+        print(md)
+
+
+if __name__ == "__main__":
+    main()

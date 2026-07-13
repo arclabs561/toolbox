@@ -16,6 +16,7 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | [bcat](bcat/) | Pipe stdin to a browser, infers filetype |
 | [blinks](blinks/) | Find broken symlinks |
 | [check-math](check-math/) | Verify math rendering in HTML/Markdown |
+| [chatgpt2md](chatgpt2md/) | Convert ChatGPT chat HTML to Markdown |
 | [claude2md](claude2md/) | Convert claude.ai chat HTML to Markdown |
 | [commit-survey](commit-survey/) | Survey a repo's commit and branch conventions |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |

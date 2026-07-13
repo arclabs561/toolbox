@@ -12,6 +12,7 @@ extend-include = [
   "toks/toks",
   "gemini2md/gemini2md",
   "claude2md/claude2md",
+  "chatgpt2md/chatgpt2md",
   "commit-survey/commit-survey",
 ]
 

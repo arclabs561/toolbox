@@ -1,0 +1,56 @@
+<!--
+  Structure reduced from public ChatGPT DOM fixtures captured in 2026:
+  https://github.com/sho7650/obsidian-AI-exporter/blob/main/test/fixtures/html/chatgpt/chat-code.html
+  https://github.com/sanand0/tools/blob/main/aiscrapers/__fixtures__/chatgpt-basic.html
+  Conversation content is synthetic.
+-->
+<html>
+  <body>
+    <aside>Sidebar chat title to ignore</aside>
+    <main>
+      <section data-testid="conversation-turn-1" data-turn="user">
+        <div data-message-author-role="user" data-message-id="user-1">
+          <div class="whitespace-pre-wrap">
+            <p>What is 2 + 2?</p>
+            <p>Show the reasoning briefly.</p>
+          </div>
+          <button aria-label="Edit message">Edit</button>
+        </div>
+      </section>
+
+      <section data-testid="conversation-turn-2" data-turn="assistant">
+        <div
+          data-message-author-role="assistant"
+          data-message-id="assistant-1"
+          data-message-model-slug="gpt-5"
+        >
+          <div class="markdown prose">
+            <p>The answer is <strong>4</strong>.</p>
+            <ul><li>It is simple arithmetic.</li></ul>
+            <p>See <a href="https://example.com/proof">Example</a>.</p>
+            <p>
+              <span class="katex">
+                <span class="katex-mathml">
+                  <math><semantics><annotation encoding="application/x-tex">2 + 2 = 4</annotation></semantics></math>
+                </span>
+                <span class="katex-html">rendered duplicate</span>
+              </span>
+            </p>
+            <pre>
+              <div class="sticky"><span>Python</span><button>Copy</button></div>
+              <div class="cm-editor">
+                <div class="cm-content"><span>print(2 + 2)</span><br><span># 4</span></div>
+              </div>
+            </pre>
+            <table>
+              <thead><tr><th>Expression</th><th>Result</th></tr></thead>
+              <tbody><tr><td>2 + 2</td><td>4</td></tr></tbody>
+            </table>
+            <div class="reasoning" hidden>Hidden reasoning to ignore</div>
+            <button aria-label="Retry">Retry</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
