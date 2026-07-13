@@ -43,3 +43,8 @@ TOOLBOX_BROWSER=1 tests/run.sh # also exercise webshot + check-math
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs shellcheck, ruff
 (`ruff.toml`), and the test suite on Linux and macOS, plus a browser job for the
 Playwright-backed tools.
+
+## License
+
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or
+the [MIT license](LICENSE-MIT), at your option.
