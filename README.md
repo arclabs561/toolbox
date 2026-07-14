@@ -20,6 +20,7 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | [claude2md](claude2md/) | Convert claude.ai chat HTML to Markdown |
 | [commit-survey](commit-survey/) | Survey a repo's commit and branch conventions |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
+| [gh-dependabot](gh-dependabot/) | Inventory open Dependabot alerts across public repositories |
 | [ips](ips/) | Show local and public IP addresses |
 | [perplexity-export](perplexity-export/) | Explore and export Perplexity chats |
 | [perplexity2md](perplexity2md/) | Convert Perplexity chat HTML to Markdown |

@@ -14,6 +14,7 @@ extend-include = [
   "claude2md/claude2md",
   "chatgpt2md/chatgpt2md",
   "commit-survey/commit-survey",
+  "gh-dependabot/gh-dependabot",
   "perplexity-export/perplexity-export",
 ]
 

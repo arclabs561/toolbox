@@ -1,0 +1,269 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""Inventory open Dependabot alerts across an owner's public source repositories."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+
+
+class GhError(RuntimeError):
+    """A GitHub CLI request failed."""
+
+
+def one_line(value: object) -> str:
+    return " ".join(str(value or "").split())
+
+
+def run_gh(args: list[str]) -> str:
+    result = subprocess.run(
+        ["gh", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = one_line(result.stderr or result.stdout) or f"exit {result.returncode}"
+        raise GhError(detail)
+    return result.stdout
+
+
+def parse_json(payload: str, context: str) -> Any:
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise GhError(f"{context} returned invalid JSON: {error.msg}") from error
+
+
+def resolve_owner(explicit_owner: str | None) -> str:
+    if explicit_owner:
+        return explicit_owner
+    owner = run_gh(["api", "user", "--jq", ".login"]).strip()
+    if not owner:
+        raise GhError("authenticated GitHub user has no login")
+    return owner
+
+
+def list_repositories(owner: str) -> list[str]:
+    payload = run_gh(
+        [
+            "repo",
+            "list",
+            owner,
+            "--limit",
+            "10000",
+            "--source",
+            "--visibility",
+            "public",
+            "--json",
+            "nameWithOwner",
+        ]
+    )
+    raw_repositories = parse_json(payload, "repository list")
+    if not isinstance(raw_repositories, list):
+        raise GhError("repository list was not a JSON array")
+
+    repositories: list[str] = []
+    for raw_repository in raw_repositories:
+        if not isinstance(raw_repository, dict):
+            raise GhError("repository list contained a non-object entry")
+        name = raw_repository.get("nameWithOwner")
+        if not isinstance(name, str) or not name:
+            raise GhError("repository list contained an entry without nameWithOwner")
+        repositories.append(name)
+    return sorted(set(repositories), key=str.casefold)
+
+
+def flatten_pages(payload: str, repository: str) -> list[dict[str, Any]]:
+    pages = parse_json(payload, repository)
+    if not isinstance(pages, list):
+        raise GhError("Dependabot response was not a JSON array")
+
+    alerts: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise GhError("Dependabot response contained a non-array page")
+        for alert in page:
+            if not isinstance(alert, dict):
+                raise GhError("Dependabot response contained a non-object alert")
+            alerts.append(alert)
+    return alerts
+
+
+def object_field(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def normalize_alert(repository: str, raw_alert: dict[str, Any]) -> dict[str, Any]:
+    number = raw_alert.get("number")
+    if not isinstance(number, int):
+        raise GhError("Dependabot alert lacked an integer number")
+
+    dependency = object_field(raw_alert.get("dependency"))
+    package = object_field(dependency.get("package"))
+    advisory = object_field(raw_alert.get("security_advisory"))
+    vulnerability = object_field(raw_alert.get("security_vulnerability"))
+    patched = object_field(vulnerability.get("first_patched_version"))
+
+    return {
+        "repository": repository,
+        "number": number,
+        "severity": one_line(advisory.get("severity")) or "unknown",
+        "ecosystem": one_line(package.get("ecosystem")) or "unknown",
+        "dependency": one_line(package.get("name")) or "unknown",
+        "manifest": one_line(dependency.get("manifest_path")) or "unknown",
+        "scope": one_line(dependency.get("scope")) or "unknown",
+        "advisory": one_line(advisory.get("ghsa_id") or advisory.get("cve_id")) or "unknown",
+        "cve": one_line(advisory.get("cve_id")) or None,
+        "patched_version": one_line(patched.get("identifier")) or None,
+        "vulnerable_versions": one_line(vulnerability.get("vulnerable_version_range")) or None,
+        "summary": one_line(advisory.get("summary")) or "unknown",
+        "url": one_line(raw_alert.get("html_url")) or "unknown",
+    }
+
+
+def scan_repository(repository: str) -> tuple[list[dict[str, Any]], str | None]:
+    try:
+        payload = run_gh(
+            [
+                "api",
+                f"repos/{repository}/dependabot/alerts",
+                "--method",
+                "GET",
+                "--paginate",
+                "--slurp",
+                "-f",
+                "state=open",
+                "-f",
+                "per_page=100",
+            ]
+        )
+        alerts = [
+            normalize_alert(repository, alert) for alert in flatten_pages(payload, repository)
+        ]
+        return alerts, None
+    except (GhError, OSError) as error:
+        return [], one_line(error)
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
+def render_human(
+    requested: int,
+    scanned: int,
+    alerts: list[dict[str, Any]],
+    errors: list[dict[str, str]],
+) -> None:
+    if alerts:
+        print("REPOSITORY\tALERT\tSEVERITY\tDEPENDENCY\tMANIFEST\tADVISORY\tPATCHED\tSUMMARY\tURL")
+        for alert in alerts:
+            print(
+                "\t".join(
+                    [
+                        str(alert["repository"]),
+                        f"#{alert['number']}",
+                        str(alert["severity"]),
+                        f"{alert['ecosystem']}/{alert['dependency']}",
+                        str(alert["manifest"]),
+                        str(alert["advisory"]),
+                        str(alert["patched_version"] or "unpatched"),
+                        str(alert["summary"]),
+                        str(alert["url"]),
+                    ]
+                )
+            )
+
+    if errors:
+        print(
+            f"INCOMPLETE: {requested} repositories requested; {scanned} scanned; "
+            f"{len(alerts)} open alerts found; {len(errors)} errors"
+        )
+        for error in errors:
+            print(f"gh-dependabot: {error['repository']}: {error['error']}", file=sys.stderr)
+    else:
+        print(f"{scanned} repositories scanned; {len(alerts)} open alerts; 0 errors")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--owner",
+        help="GitHub user or organization to scan (default: authenticated user)",
+    )
+    parser.add_argument("--jobs", type=positive_int, default=8, help="concurrent API requests")
+    parser.add_argument("--json", action="store_true", help="emit structured JSON")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if shutil.which("gh") is None:
+        print("gh-dependabot: 'gh' is not on PATH", file=sys.stderr)
+        return 2
+
+    try:
+        owner = resolve_owner(args.owner)
+        repositories = list_repositories(owner)
+    except (GhError, OSError) as error:
+        print(f"gh-dependabot: {one_line(error)}", file=sys.stderr)
+        return 2
+
+    results: list[tuple[list[dict[str, Any]], str | None]] = []
+    if repositories:
+        workers = min(args.jobs, len(repositories))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            results = list(executor.map(scan_repository, repositories))
+
+    alerts: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for repository, (repository_alerts, error) in zip(repositories, results, strict=True):
+        if error is None:
+            alerts.extend(repository_alerts)
+        else:
+            errors.append({"repository": repository, "error": error})
+
+    alerts.sort(key=lambda alert: (str(alert["repository"]).casefold(), alert["number"]))
+    errors.sort(key=lambda error: error["repository"].casefold())
+    scanned = len(repositories) - len(errors)
+
+    if args.json:
+        json.dump(
+            {
+                "owner": owner,
+                "repositories_requested": len(repositories),
+                "repositories_scanned": scanned,
+                "open_alerts": len(alerts),
+                "alerts": alerts,
+                "errors": errors,
+            },
+            sys.stdout,
+            indent=2,
+            sort_keys=True,
+        )
+        print()
+    else:
+        render_human(len(repositories), scanned, alerts, errors)
+
+    if errors:
+        return 2
+    if alerts:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
