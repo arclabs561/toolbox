@@ -4,7 +4,7 @@
 # dependencies = ["httpx", "psutil"]
 # ///
 
-"""Show local and public IP addresses.
+"""Show local/public IP addresses and run bounded network diagnostics.
 
 ips        local interfaces + public IP
 ips -v     add geo info (city, country, org)
@@ -12,11 +12,19 @@ ips -4     force IPv4 for public lookup
 ips -6     force IPv6 for public lookup
 ips -c     copy public IP to clipboard
 ips -p     public IP only (skip local)
+ips diag   run read-only network diagnostics
+ips link   show local network configuration
+ips peers  show passive neighbor-cache entries
+ips speed HOST  run an explicit iperf3 speed test
 """
 
 import argparse
 import contextlib
+import dataclasses
+import ipaddress
+import json
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -25,23 +33,23 @@ import time
 
 import httpx
 import psutil
-
-SKIP_IFACES = {"lo", "lo0", "awdl0", "llw0", "ap1", "anpi0", "anpi1"}
-
-IFACE_LABELS: dict[str, str] = {
-    "en0": "wifi",
-    "en1": "ethernet",
-    "en2": "ethernet",
-    "en3": "usb-eth",
-    "en4": "usb-eth",
-    "eth0": "ethernet",
-    "eth1": "ethernet",
-    "wlan0": "wifi",
-    "wlp0s20f3": "wifi",
-    "docker0": "docker",
-}
+from metrics import human_number, human_rate, latency_metrics, percentile
+from net_platform import (
+    default_iface,
+    gateway_ip,
+    is_ipv4,
+    label_for,
+    local_ips,
+    resolver_servers,
+    wifi_ssid,
+)
 
 _tty = sys.stdout.isatty()
+DIAG_TARGET = "example.com"
+DIAG_COUNT = 20
+DIAG_TIMEOUT = 2.0
+SPEED_DURATION = 10
+SPEED_PORT = 5201
 
 
 def dim(text: str) -> str:
@@ -52,147 +60,10 @@ def bold(text: str) -> str:
     return f"\033[1m{text}\033[0m" if _tty else text
 
 
-def is_ipv4(addr: str) -> bool:
-    return "." in addr
-
-
-def label_for(iface: str) -> str:
-    if iface in IFACE_LABELS:
-        return IFACE_LABELS[iface]
-    for prefix in ("br-", "veth"):
-        if iface.startswith(prefix):
-            return "docker"
-    if iface.startswith(("utun", "tun", "wg")):
-        return "vpn"
-    if iface.startswith("tailscale"):
-        return "tailscale"
-    if iface.startswith("wl"):
-        return "wifi"
-    if iface.startswith("en") or iface.startswith("eth"):
-        return "ethernet"
-    return iface
-
-
 # -- default route detection --------------------------------------------------
 
 
-def default_iface() -> str | None:
-    """Return the interface name that carries the default route."""
-    try:
-        if platform.system() == "Darwin":
-            out = subprocess.run(
-                ["route", "-n", "get", "default"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            for line in out.splitlines():
-                if "interface:" in line:
-                    return line.split("interface:")[-1].strip()
-        else:
-            out = subprocess.run(
-                ["ip", "route", "get", "1.1.1.1"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            for token in out.split():
-                if token == "dev":
-                    idx = out.split().index("dev")
-                    return out.split()[idx + 1]
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    return None
-
-
-def gateway_ip() -> str | None:
-    """Return the default gateway IP."""
-    try:
-        if platform.system() == "Darwin":
-            out = subprocess.run(
-                ["route", "-n", "get", "default"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            for line in out.splitlines():
-                if "gateway:" in line:
-                    return line.split("gateway:")[-1].strip()
-        else:
-            out = subprocess.run(
-                ["ip", "route", "show", "default"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            parts = out.split()
-            if "via" in parts:
-                return parts[parts.index("via") + 1]
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    return None
-
-
 # -- wifi SSID -----------------------------------------------------------------
-
-
-def wifi_ssid() -> str | None:
-    """Return current WiFi SSID, or None."""
-    try:
-        if platform.system() == "Darwin":
-            out = subprocess.run(
-                ["ipconfig", "getsummary", "en0"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            for line in out.splitlines():
-                if "SSID" in line and "BSSID" not in line:
-                    return line.split(":", 1)[-1].strip()
-        else:
-            out = subprocess.run(
-                ["iwgetid", "-r"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            return out or None
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    return None
-
-
-# -- local interfaces via psutil -----------------------------------------------
-
-
-def local_ips(active_iface: str | None) -> list[tuple[str, str, str, bool]]:
-    """Return (interface, label, addr, is_default) tuples."""
-    addrs = psutil.net_if_addrs()
-    stats = psutil.net_if_stats()
-
-    results: list[tuple[str, str, str, bool]] = []
-    seen: set[str] = set()
-
-    for iface, addr_list in addrs.items():
-        if iface in SKIP_IFACES:
-            continue
-        st = stats.get(iface)
-        if st and not st.isup:
-            continue
-        for addr in addr_list:
-            if addr.family not in (socket.AF_INET, socket.AF_INET6):
-                continue
-            ip = addr.address.split("%")[0]  # strip zone id
-            if ip in ("127.0.0.1", "::1") or ip.startswith("fe80"):
-                continue
-            if ip in seen:
-                continue
-            seen.add(ip)
-            is_default = iface == active_iface
-            results.append((iface, label_for(iface), ip, is_default))
-
-    results.sort(key=lambda r: (not r[3], r[1], not is_ipv4(r[2])))
-    return results
 
 
 # -- public IP -----------------------------------------------------------------
@@ -204,15 +75,193 @@ PUBLIC_ENDPOINTS = [
 ]
 
 
+# -- diagnostics --------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class Check:
+    name: str
+    status: str
+    detail: str
+    latency_ms: int | None = None
+    metrics: dict[str, object] | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "name": self.name,
+            "status": self.status,
+            "detail": self.detail,
+        }
+        if self.latency_ms is not None:
+            result["latency_ms"] = self.latency_ms
+        if self.metrics is not None:
+            result["metrics"] = self.metrics
+        return result
+
+
+def family_for(args: argparse.Namespace) -> int:
+    if args.ipv4:
+        return socket.AF_INET
+    if args.ipv6:
+        return socket.AF_INET6
+    return socket.AF_UNSPEC
+
+
+def ping_check(host: str | None, count: int, timeout: float) -> Check:
+    if not host:
+        return Check("gateway", "unknown", "default gateway not found")
+
+    if platform.system() == "Windows":
+        command = ["ping", "-n", str(count), "-w", str(int(timeout * 1000)), host]
+    else:
+        command = ["ping", "-n", "-c", str(count), host]
+
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=(count * timeout) + 2,
+            check=False,
+        )
+    except FileNotFoundError:
+        return Check("gateway", "unavailable", "ping command not found")
+    except subprocess.TimeoutExpired:
+        return Check("gateway", "timeout", f"no result within {count * timeout + 2:.1f}s")
+
+    elapsed = int((time.monotonic() - started) * 1000)
+    output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"([0-9]+(?:[.,][0-9]+)?)%\s*(?:packet )?loss", output, re.I)
+    loss = f", {match.group(1)}% loss" if match else ""
+    times = re.findall(r"time[=<]\s*([0-9]+(?:[.,][0-9]+)?)\s*ms", output, re.I)
+    samples = [float(value.replace(",", ".")) for value in times]
+    latency = int(percentile(samples, 0.50) or elapsed)
+    status = (
+        "pass"
+        if result.returncode == 0 and samples
+        else ("unknown" if result.returncode == 0 else "fail")
+    )
+    detail = f"{host}, {count} attempt(s){loss}"
+    return Check("gateway", status, detail, latency, latency_metrics(samples, count))
+
+
+def dns_check(target: str, family: int) -> Check:
+    started = time.monotonic()
+    try:
+        addresses = socket.getaddrinfo(target, None, family, socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        return Check("dns", "fail", f"{target}: {exc}")
+
+    unique = {item[4][0].split("%", 1)[0] for item in addresses}
+    latency = int((time.monotonic() - started) * 1000)
+    return Check("dns", "pass", f"{target} -> {len(unique)} address(es)", latency)
+
+
+def https_check(target: str, timeout: float, args: argparse.Namespace) -> Check:
+    transport = None
+    if args.ipv4:
+        transport = httpx.HTTPTransport(local_address="0.0.0.0")
+    elif args.ipv6:
+        transport = httpx.HTTPTransport(local_address="::")
+
+    url = f"https://{target}/"
+    started = time.monotonic()
+    try:
+        with httpx.Client(timeout=timeout, transport=transport, follow_redirects=True) as client:
+            response = client.get(url)
+    except httpx.HTTPError as exc:
+        return Check("https", "fail", f"{target}: {type(exc).__name__}")
+
+    latency = int((time.monotonic() - started) * 1000)
+    status = "pass" if response.is_success else "fail"
+    return Check("https", status, f"{target}: HTTP {response.status_code}", latency)
+
+
+def diagnostics(args: argparse.Namespace) -> int:
+    active = default_iface()
+    gateway = gateway_ip()
+    addresses = local_ips(active)
+    ssid = wifi_ssid(active)
+    checks: list[Check] = []
+    if args.command != "link":
+        checks = [
+            ping_check(gateway, DIAG_COUNT, DIAG_TIMEOUT),
+            dns_check(DIAG_TARGET, family_for(args)),
+            https_check(DIAG_TARGET, DIAG_TIMEOUT, args),
+        ]
+
+    data = {
+        "host": socket.gethostname().removesuffix(".local"),
+        "mode": args.command,
+        "platform": platform.platform(),
+        "interface": active,
+        "link": label_for(active) if active else None,
+        "ssid": ssid,
+        "gateway": gateway,
+        "resolvers": resolver_servers(),
+        "addresses": [
+            {
+                "interface": iface,
+                "label": label,
+                "address": addr,
+                "family": "4" if is_ipv4(addr) else "6",
+            }
+            for iface, label, addr, _is_default in addresses
+        ],
+        "checks": [check.as_dict() for check in checks],
+    }
+
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        title = "network link snapshot" if args.command == "link" else "network diagnostics"
+        print(bold(f"{data['host']}  {title}"))
+        print(f"  platform       {data['platform']}")
+        print(f"  interface      {active or '(unknown)'}")
+        print(f"  link           {data['link'] or '(unknown)'}")
+        if ssid:
+            print(f"  ssid           {ssid}")
+        print(f"  gateway        {gateway or '(unknown)'}")
+        print(f"  resolvers      {', '.join(data['resolvers']) or '(unknown)'}")
+        if args.command == "link":
+            print("  addresses")
+            for address in data["addresses"]:
+                print(f"    {address['interface']:<12} {address['address']}")
+        else:
+            print(f"  path           {data['link'] or '?'} {active or '?'} -> {gateway or '?'}")
+        if checks:
+            print("  checks")
+            for check in checks:
+                timing = f" {check.latency_ms}ms" if check.latency_ms is not None else ""
+                print(f"    {check.status:<11} {check.name:<8} {check.detail}{timing}")
+                if check.metrics:
+                    print(
+                        f"      rtt_p50={human_number(check.metrics['rtt_p50_ms'], 'ms')} "
+                        f"rtt_p95={human_number(check.metrics['rtt_p95_ms'], 'ms')} "
+                        f"rtt_p99={human_number(check.metrics['rtt_p99_ms'], 'ms')} "
+                        f"loss={human_number(check.metrics['loss_rate'] * 100 if check.metrics['loss_rate'] is not None else None, '%')} "
+                        f"rtt_var(sample)={human_number(check.metrics['rtt_sample_variance_ms2'], 'ms²')} "
+                        f"rtt_ipdv_abs_mean={human_number(check.metrics['rtt_ipdv_abs_mean_ms'], 'ms')}"
+                    )
+
+    return 1 if any(check.status == "fail" for check in checks) else 0
+
+
 def public_ip(client: httpx.Client) -> tuple[str, int]:
     """Return (ip, latency_ms). Tries multiple endpoints."""
     for url in PUBLIC_ENDPOINTS:
         try:
             t0 = time.monotonic()
             resp = client.get(url)
+            resp.raise_for_status()
             ms = int((time.monotonic() - t0) * 1000)
             ip = resp.text.strip()
-            if ip:
+            try:
+                parsed = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if parsed.is_global:
                 return ip, ms
         except httpx.HTTPError:
             continue
@@ -241,24 +290,272 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
+# -- passive peer view --------------------------------------------------------
+
+
+def peer_cache() -> dict[str, object]:
+    """Read the native neighbor cache; this does not probe the LAN."""
+    system = platform.system()
+    if system == "Darwin":
+        commands = [["arp", "-an"], ["ndp", "-an"]]
+    elif system == "Windows":
+        commands = [["arp", "-a"]]
+    else:
+        commands = [["ip", "neigh", "show"], ["arp", "-an"]]
+
+    outputs: list[tuple[list[str], str]] = []
+    for command in commands:
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+        outputs.append((command, result.stdout))
+
+    if not outputs:
+        return {"status": "unavailable", "detail": "no neighbor-cache command found", "peers": []}
+
+    mac_pattern = re.compile(r"(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}", re.I)
+    ip_pattern = re.compile(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?!\w)|[0-9a-f:]{3,}", re.I)
+    local_addresses = {
+        address.split("%", 1)[0]
+        for iface_addresses in psutil.net_if_addrs().values()
+        for addr in iface_addresses
+        if addr.family in (socket.AF_INET, socket.AF_INET6)
+        for address in (addr.address,)
+    }
+    peers: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for _command, output in outputs:
+        current_interface: str | None = None
+        for line in output.splitlines():
+            if system == "Windows" and line.strip().startswith("Interface:"):
+                current_interface = line.split(":", 1)[1].split("---", 1)[0].strip()
+                continue
+            ip_match = ip_pattern.search(line)
+            if not ip_match:
+                continue
+            address = ip_match.group(0)
+            with contextlib.suppress(ValueError):
+                parsed_address = ipaddress.ip_address(address)
+                if (
+                    address in local_addresses
+                    or parsed_address.is_multicast
+                    or parsed_address.is_loopback
+                    or parsed_address.is_unspecified
+                ):
+                    continue
+            mac_match = mac_pattern.search(line)
+            if mac_match:
+                mac = mac_match.group(0).lower().replace("-", ":")
+                first_octet = int(mac.split(":", 1)[0], 16)
+                if mac == "ff:ff:ff:ff:ff:ff" or first_octet & 1:
+                    continue
+            else:
+                mac = None
+            interface = current_interface
+            tokens = line.split()
+            if "dev" in tokens:
+                interface = tokens[tokens.index("dev") + 1]
+            elif "on" in tokens:
+                interface = tokens[tokens.index("on") + 1]
+            state_tokens = {token.upper() for token in tokens}
+            state = next(
+                (
+                    candidate
+                    for candidate in (
+                        "REACHABLE",
+                        "STALE",
+                        "DELAY",
+                        "PROBE",
+                        "FAILED",
+                        "INCOMPLETE",
+                        "DYNAMIC",
+                    )
+                    if candidate in state_tokens
+                ),
+                None,
+            )
+            key = (address, mac, interface)
+            if key in seen:
+                continue
+            seen.add(key)
+            peers.append(
+                {
+                    "address": address,
+                    "mac": mac,
+                    "interface": interface,
+                    "state": state,
+                }
+            )
+
+    peers.sort(key=lambda peer: (peer["interface"] or "", peer["address"]))
+    return {
+        "status": "pass",
+        "source": [" ".join(command) for command, _output in outputs],
+        "peers": peers,
+    }
+
+
+def show_peers(args: argparse.Namespace) -> int:
+    data = peer_cache()
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+    else:
+        print("recently observed peers (neighbor cache; not a liveness scan)")
+        if data["status"] == "unavailable":
+            print(f"  {data['detail']}", file=sys.stderr)
+        elif not data["peers"]:
+            print("  no cached peers")
+        else:
+            for peer in data["peers"]:
+                print(
+                    f"  {peer['address']:<40} {peer['mac'] or '(no mac)':<18} "
+                    f"{peer['interface'] or '(unknown)':<10} {peer['state'] or '(unknown)'}"
+                )
+    return 0 if data["status"] != "unavailable" else 2
+
+
+# -- iperf3 speed view --------------------------------------------------------
+
+
+def show_speed(args: argparse.Namespace) -> int:
+    if not shutil.which("iperf3"):
+        print("ips: speed requires iperf3 on PATH", file=sys.stderr)
+        return 2
+    command = [
+        "iperf3",
+        "-J",
+        "-c",
+        args.command_target,
+        "-p",
+        str(SPEED_PORT),
+        "-t",
+        str(SPEED_DURATION),
+    ]
+    if args.ipv4:
+        command.append("-4")
+    elif args.ipv6:
+        command.append("-6")
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=SPEED_DURATION + 15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print("ips: iperf3 timed out", file=sys.stderr)
+        return 1
+
+    valid_report = True
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        valid_report = False
+        report = {"error": result.stderr.strip() or "iperf3 returned invalid JSON"}
+
+    envelope = {
+        "tool": "iperf3",
+        "mode": "tcp",
+        "target": args.command_target,
+        "duration_s": SPEED_DURATION,
+        "report": report,
+    }
+    success = result.returncode == 0 and valid_report and "end" in report
+    if args.json:
+        print(json.dumps(envelope, indent=2))
+        return result.returncode or (0 if success else 1)
+    else:
+        if not success:
+            detail = report.get("error", "iperf3 did not produce a completed report")
+            print(f"ips: speed failed: {detail}", file=sys.stderr)
+            return result.returncode or 1
+        print(f"iperf3 {args.command_target}:{SPEED_PORT} (TCP, {SPEED_DURATION}s)")
+        end = report.get("end", {})
+        for label, section in (
+            ("sent", end.get("sum_sent", {})),
+            ("received", end.get("sum_received", {})),
+        ):
+            if not section:
+                continue
+            fields = []
+            if "bits_per_second" in section:
+                fields.append(f"{human_rate(section['bits_per_second'])}")
+            if "retransmits" in section:
+                fields.append(f"retransmits={section['retransmits']}")
+            if fields:
+                print(f"  {label}: {' '.join(fields)}")
+        if result.stderr.strip():
+            print(result.stderr.strip(), file=sys.stderr)
+    return result.returncode
+
+
 # -- main ----------------------------------------------------------------------
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Show local and public IPs")
+    parser = argparse.ArgumentParser(
+        description="Show local/public IPs or inspect the active network path.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+commands:
+  diag              gateway RTT, DNS, and HTTPS checks (read-only)
+  link              interface, route, resolver, and address snapshot
+  peers             native neighbor-cache view; no LAN probe
+  speed HOST        fixed 10-second TCP test to an iperf3 server
+
+examples:
+  ips
+  ips diag
+  ips diag --json
+  ips peers
+  ips speed 192.168.1.10
+""",
+    )
     proto = parser.add_mutually_exclusive_group()
     proto.add_argument("-4", dest="ipv4", action="store_true", help="force IPv4")
     proto.add_argument("-6", dest="ipv6", action="store_true", help="force IPv6")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=("diag", "link", "peers", "speed"),
+        metavar="COMMAND",
+        help="diag, link, peers, or speed",
+    )
+    parser.add_argument("command_target", nargs="?", metavar="HOST", help="HOST for speed")
     parser.add_argument("-v", dest="verbose", action="store_true", help="geo info")
     parser.add_argument("-c", dest="copy", action="store_true", help="copy public IP")
     parser.add_argument("-p", dest="public_only", action="store_true", help="public only")
+    parser.add_argument("--diag", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
     args = parser.parse_args()
+
+    command = args.command or ("diag" if args.diag else None)
+    if command == "peers":
+        if args.command_target:
+            parser.error("peers does not take a host")
+        raise SystemExit(show_peers(args))
+    if command == "speed":
+        if not args.command_target:
+            parser.error("speed requires HOST")
+        raise SystemExit(show_speed(args))
+    if command in {"diag", "link"}:
+        args.command = command
+        if args.copy or args.public_only or args.verbose:
+            parser.error(f"{command} cannot be combined with -c, -p, or -v")
+        if args.command_target:
+            parser.error(f"{command} does not take a host")
+        raise SystemExit(diagnostics(args))
+    if args.json or args.command_target:
+        parser.error("use a command: diag, link, peers, or speed HOST")
 
     # local
     if not args.public_only:
         host = socket.gethostname().removesuffix(".local")
         active = default_iface()
-        ssid = wifi_ssid()
+        ssid = wifi_ssid(active)
         gw = gateway_ip()
 
         header = host

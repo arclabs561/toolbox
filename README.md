@@ -5,9 +5,13 @@ Simple CLI tools. Each lives in its own directory; `bin/` has symlinks for PATH.
 ## Setup
 
 ```sh
-# add to your shell profile
-export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
+just install       # validate tools and create bin/ links
+eval "$(just path)" # or add the printed line to your shell profile
 ```
+
+Tools are mostly PEP 723 scripts, so there is no separate runtime install or
+compiled artifact. `just build` validates the scripts; `just test` runs the
+integration suite.
 
 ## Tools
 
@@ -21,7 +25,7 @@ export PATH="$HOME/Documents/dev/toolbox/bin:$PATH"
 | [commit-survey](commit-survey/) | Survey a repo's commit and branch conventions |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
 | [gh-dependabot](gh-dependabot/) | Inventory open Dependabot alerts across public repositories |
-| [ips](ips/) | Show local and public IP addresses |
+| [ips](ips/) | Show local/public IPs and run network diagnostics |
 | [perplexity-export](perplexity-export/) | Explore and export Perplexity chats |
 | [perplexity2md](perplexity2md/) | Convert Perplexity chat HTML to Markdown |
 | [reflow](reflow/) | Reflow Markdown text preserving code blocks |
