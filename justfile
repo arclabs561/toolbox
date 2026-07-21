@@ -19,8 +19,17 @@ test:
     bash tests/run.sh
 
 # Exercise the read-only Linux adapter inside an isolated container namespace.
+# Uses the active Docker context (Colima on this machine). The base image must
+# already be cached, or be available through that context's configured registry.
 test-docker:
-    docker build -f tests/docker/Dockerfile -t toolbox-ips-smoke .
+    @printf 'docker context: '
+    @docker context show
+    if ! docker image inspect "${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" >/dev/null 2>&1; then \
+        echo "missing local base image: ${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" >&2; \
+        echo 'set TOOLBOX_DOCKER_BASE to a cached image or make the image available through Colima' >&2; \
+        exit 2; \
+    fi
+    docker build --build-arg "BASE_IMAGE=${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" -f tests/docker/Dockerfile -t toolbox-ips-smoke .
     docker run --rm --network none toolbox-ips-smoke
 
 # Validate the source suite; toolbox tools are PEP 723 scripts and need no compile step.

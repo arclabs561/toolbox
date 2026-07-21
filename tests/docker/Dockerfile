@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE}
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y iproute2 iputils-ping \
