@@ -53,6 +53,26 @@ with (
     assert net_platform.gateway_ip() == "192.0.2.1"
 
 
+with (
+    patch.object(net_platform.platform, "system", return_value="Linux"),
+    patch.object(
+        net_platform.psutil,
+        "net_if_addrs",
+        return_value={
+            "eth0": [SimpleNamespace(family=socket.AF_INET, address="192.0.2.2")],
+        },
+    ),
+    patch.object(
+        net_platform.psutil,
+        "net_if_stats",
+        side_effect=OSError(38, "Function not implemented"),
+    ),
+):
+    assert net_platform.local_ips("eth0") == [
+        ("eth0", "ethernet", "192.0.2.2", True),
+    ]
+
+
 def neighbor_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
     if command == ["ip", "neigh", "show"]:
         return result(
@@ -107,6 +127,27 @@ assert net_platform.parse_macos_wifi(mac_wifi, "en0") == {
     "phy": "802.11ac",
     "tx_rate_mbps": 650,
     "mcs": 7,
+}
+
+corewlan_wifi = """
+{
+  "signal_dbm": -60,
+  "noise_dbm": -94,
+  "channel": 157,
+  "channel_width": 3,
+  "channel_band": 2,
+  "phy_mode": 6,
+  "tx_rate_mbps": 351
+}
+"""
+assert net_platform.parse_corewlan_wifi(corewlan_wifi) == {
+    "signal_dbm": -60,
+    "noise_dbm": -94,
+    "channel": 157,
+    "channel_width_mhz": 80,
+    "band": "5GHz",
+    "phy": "802.11ax",
+    "tx_rate_mbps": 351,
 }
 
 linux_wifi = """

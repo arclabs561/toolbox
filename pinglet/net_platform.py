@@ -21,6 +21,29 @@ IFACE_LABELS: dict[str, str] = {
     "docker0": "docker",
 }
 
+MACOS_COREWLAN_SWIFT = r"""
+import CoreWLAN
+import Darwin
+import Foundation
+
+guard CommandLine.arguments.count == 2,
+      let interface = CWWiFiClient.shared().interface(withName: CommandLine.arguments[1]) else {
+    exit(2)
+}
+let channel = interface.wlanChannel()
+let payload: [String: Any] = [
+    "signal_dbm": interface.rssiValue(),
+    "noise_dbm": interface.noiseMeasurement(),
+    "channel": channel?.channelNumber ?? 0,
+    "channel_width": channel?.channelWidth.rawValue ?? 0,
+    "channel_band": channel?.channelBand.rawValue ?? 0,
+    "phy_mode": interface.activePHYMode().rawValue,
+    "tx_rate_mbps": interface.transmitRate(),
+]
+let data = try! JSONSerialization.data(withJSONObject: payload)
+FileHandle.standardOutput.write(data)
+"""
+
 
 def is_ipv4(addr: str) -> bool:
     return "." in addr
@@ -193,6 +216,40 @@ def _number(value: str) -> float | int | None:
     return int(number) if number.is_integer() else number
 
 
+def parse_corewlan_wifi(output: str) -> dict[str, object] | None:
+    """Normalize identifier-free CoreWLAN fields emitted by the Swift probe."""
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    result: dict[str, object] = {}
+    for key in ("signal_dbm", "noise_dbm", "channel", "tx_rate_mbps"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and value != 0:
+            result[key] = value
+
+    width = payload.get("channel_width")
+    if width in {1, 2, 3, 4}:
+        result["channel_width_mhz"] = {1: 20, 2: 40, 3: 80, 4: 160}[width]
+    band = payload.get("channel_band")
+    if band in {1, 2, 3}:
+        result["band"] = {1: "2.4GHz", 2: "5GHz", 3: "6GHz"}[band]
+    phy_mode = payload.get("phy_mode")
+    if phy_mode in {1, 2, 3, 4, 5, 6}:
+        result["phy"] = {
+            1: "802.11a",
+            2: "802.11b",
+            3: "802.11g",
+            4: "802.11n",
+            5: "802.11ac",
+            6: "802.11ax",
+        }[phy_mode]
+    return result or None
+
+
 def parse_macos_wifi(output: str, iface: str | None) -> dict[str, object] | None:
     """Extract current Wi-Fi radio fields from system_profiler JSON."""
     try:
@@ -274,6 +331,19 @@ def wifi_telemetry(iface: str | None) -> dict[str, object] | None:
         return None
     try:
         if platform.system() == "Darwin":
+            try:
+                corewlan = subprocess.run(
+                    ["swift", "-e", MACOS_COREWLAN_SWIFT, iface],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    check=True,
+                ).stdout
+                telemetry = parse_corewlan_wifi(corewlan)
+                if telemetry:
+                    return telemetry
+            except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                pass
             output = subprocess.run(
                 ["system_profiler", "SPAirPortDataType", "-json"],
                 capture_output=True,
@@ -306,7 +376,12 @@ def wifi_telemetry(iface: str | None) -> dict[str, object] | None:
 def local_ips(active_iface: str | None) -> list[tuple[str, str, str, bool]]:
     """Return (interface, label, addr, is_default) tuples."""
     addrs = psutil.net_if_addrs()
-    stats = psutil.net_if_stats()
+    try:
+        stats = psutil.net_if_stats()
+    except OSError:
+        # Interface addresses remain useful when a platform cannot provide
+        # link-state ioctls, notably amd64 Linux under QEMU on Apple silicon.
+        stats = {}
 
     results: list[tuple[str, str, str, bool]] = []
     seen: set[str] = set()

@@ -77,7 +77,7 @@ exact role name expected for that session. No repository is created or changed:
 ```sh
 TOOLBOX_AWS_PROFILE=temporary-apply \
 TOOLBOX_ECR_ROLE=your-privileged-role \
-TOOLBOX_ECR_IMAGE=ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arclabs-pinglet-base \
+TOOLBOX_ECR_IMAGE=ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arclabs-toolbox-pinglet-base \
 just docker-base-push-ecr
 ```
 
