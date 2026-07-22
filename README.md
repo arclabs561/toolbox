@@ -69,6 +69,23 @@ The push target defaults to
 `TOOLBOX_DOCKER_BASE` to smoke-test a registry tag or another already available
 image.
 
+The optional ECR publisher follows the same separation between routine
+observation and privileged mutation used by the infrastructure tooling. It
+requires an existing ECR repository, a separate short-lived profile, and the
+exact role name expected for that session. No repository is created or changed:
+
+```sh
+TOOLBOX_AWS_PROFILE=temporary-apply \
+TOOLBOX_ECR_ROLE=your-privileged-role \
+TOOLBOX_ECR_IMAGE=ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arclabs-pinglet-base \
+just docker-base-push-ecr
+```
+
+The target receives an immutable `YYYYMMDD-COMMIT` tag (with a dirty-tree
+suffix when applicable) and `latest`. AWS and Docker authentication are
+performed with a temporary mode-700 Docker config that is removed on exit.
+Provision the repository through a reviewed IaC path before using this target.
+
 For a bounded local matrix, provide only images and platforms already available
 to the active context:
 
