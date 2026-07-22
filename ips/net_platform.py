@@ -2,7 +2,9 @@
 
 import contextlib
 import functools
+import json
 import platform
+import re
 import socket
 import subprocess
 from pathlib import Path
@@ -181,6 +183,124 @@ def wifi_ssid(iface: str | None) -> str | None:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
     return None
+
+
+def _number(value: str) -> float | int | None:
+    match = re.search(r"-?\d+(?:\.\d+)?", value)
+    if not match:
+        return None
+    number = float(match.group())
+    return int(number) if number.is_integer() else number
+
+
+def parse_macos_wifi(output: str, iface: str | None) -> dict[str, object] | None:
+    """Extract current Wi-Fi radio fields from system_profiler JSON."""
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return None
+    for adapter in payload.get("SPAirPortDataType", []):
+        for interface in adapter.get("spairport_airport_interfaces", []):
+            if iface and interface.get("_name") != iface:
+                continue
+            current = interface.get("spairport_current_network_information") or {}
+            if not current:
+                continue
+            result: dict[str, object] = {}
+            signal_noise = current.get("spairport_signal_noise", "")
+            values = re.findall(r"-?\d+(?:\.\d+)?", signal_noise)
+            if values:
+                result["signal_dbm"] = _number(values[0])
+            if len(values) > 1:
+                result["noise_dbm"] = _number(values[1])
+            channel = current.get("spairport_network_channel", "")
+            if channel:
+                result["channel"] = _number(channel)
+                width = re.search(r"(\d+)MHz", channel)
+                if width:
+                    result["channel_width_mhz"] = int(width.group(1))
+                band = re.search(r"\(([^,]+)", channel)
+                if band:
+                    result["band"] = band.group(1)
+            if current.get("spairport_network_phymode"):
+                result["phy"] = current["spairport_network_phymode"]
+            if current.get("spairport_network_rate") is not None:
+                result["tx_rate_mbps"] = current["spairport_network_rate"]
+            if current.get("spairport_network_mcs") is not None:
+                result["mcs"] = current["spairport_network_mcs"]
+            return result or None
+    return None
+
+
+def parse_linux_wifi(output: str) -> dict[str, object] | None:
+    """Extract non-identifying fields from `iw dev IFACE link` output."""
+    if "Not connected" in output:
+        return None
+    result: dict[str, object] = {}
+    frequency = re.search(r"^\s*freq:\s*(\d+)", output, re.MULTILINE)
+    signal = re.search(r"^\s*signal:\s*(-?\d+(?:\.\d+)?)\s*dBm", output, re.MULTILINE)
+    bitrate = re.search(r"^\s*tx bitrate:\s*(\d+(?:\.\d+)?)\s*MBit/s", output, re.MULTILINE)
+    if frequency:
+        result["frequency_mhz"] = int(frequency.group(1))
+    if signal:
+        result["signal_dbm"] = _number(signal.group(1))
+    if bitrate:
+        result["tx_rate_mbps"] = _number(bitrate.group(1))
+    return result or None
+
+
+def parse_windows_wifi(output: str) -> dict[str, object] | None:
+    """Extract non-identifying fields from `netsh wlan show interfaces`."""
+    if not output.strip() or re.search(r"State\s*:\s*disconnected", output, re.I):
+        return None
+    result: dict[str, object] = {}
+    fields = {
+        "Signal": "signal_percent",
+        "Channel": "channel",
+        "Receive rate (Mbps)": "rx_rate_mbps",
+        "Transmit rate (Mbps)": "tx_rate_mbps",
+        "Radio type": "phy",
+    }
+    for label, key in fields.items():
+        match = re.search(rf"^\s*{re.escape(label)}\s*:\s*(.+)$", output, re.MULTILINE)
+        if match:
+            result[key] = _number(match.group(1)) if key != "phy" else match.group(1).strip()
+    return result or None
+
+
+def wifi_telemetry(iface: str | None) -> dict[str, object] | None:
+    """Return available radio telemetry without exposing BSSID or nearby SSIDs."""
+    if not iface or label_for(iface) != "wifi":
+        return None
+    try:
+        if platform.system() == "Darwin":
+            output = subprocess.run(
+                ["system_profiler", "SPAirPortDataType", "-json"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=True,
+            ).stdout
+            return parse_macos_wifi(output, iface)
+        if platform.system() == "Windows":
+            output = subprocess.run(
+                ["netsh", "wlan", "show", "interfaces"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=True,
+            ).stdout
+            return parse_windows_wifi(output)
+        output = subprocess.run(
+            ["iw", "dev", iface, "link"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=True,
+        ).stdout
+        return parse_linux_wifi(output)
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
 
 
 def local_ips(active_iface: str | None) -> list[tuple[str, str, str, bool]]:

@@ -50,6 +50,23 @@ def latency_metrics(samples: list[float], sent: int) -> dict[str, object]:
     }
 
 
+def quality_status(metrics: dict[str, object] | None) -> str:
+    """Classify latency quality separately from whether a probe replied."""
+    if not metrics or metrics.get("received", 0) == 0:
+        return "unknown"
+
+    loss_rate = metrics.get("loss_rate")
+    p50 = metrics.get("rtt_p50_ms")
+    p95 = metrics.get("rtt_p95_ms")
+    if not isinstance(p50, (int, float)) or not isinstance(p95, (int, float)):
+        return "unknown"
+    if isinstance(loss_rate, (int, float)) and loss_rate > 0:
+        return "degraded"
+    if p95 - p50 >= 20 or (p50 > 0 and p95 / p50 >= 3):
+        return "degraded"
+    return "pass"
+
+
 def human_number(value: object, suffix: str = "") -> str:
     if value is None:
         return "?"

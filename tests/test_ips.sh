@@ -32,4 +32,9 @@ adapters=$(
 )
 assert_contains "offline adapter checks pass" "$adapters" "ips adapters: ok"
 
+speed=$(
+  uv run --with httpx --with psutil python "$ROOT/tests/test_ips_speed.py" "$ROOT/ips/ips" 2>&1
+)
+assert_contains "offline speed envelope checks pass" "$speed" "ips speed: ok"
+
 finish

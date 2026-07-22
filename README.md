@@ -57,6 +57,21 @@ TOOLBOX_DOCKER_INSTALL_DEPS=0 \
 just test-docker
 ```
 
+For a bounded local matrix, provide only images and platforms already available
+to the active context:
+
+```sh
+TOOLBOX_DOCKER_BASES='image-a image-b' \
+TOOLBOX_DOCKER_PLATFORMS='linux/arm64 linux/amd64' \
+TOOLBOX_DOCKER_INSTALL_DEPS=0 \
+just test-docker-matrix
+```
+
+The matrix does not pull images implicitly. Set `TOOLBOX_DOCKER_INSTALL_DEPS=0`
+when the cached bases already contain `httpx` and `psutil` or run as a
+non-root user. A platform that is not supported by the selected base image
+fails as a normal container-test failure.
+
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs shellcheck, ruff
 (`ruff.toml`), and the test suite on Linux and macOS, plus a browser job for the
 Playwright-backed tools.

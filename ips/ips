@@ -12,10 +12,10 @@ ips -4     force IPv4 for public lookup
 ips -6     force IPv6 for public lookup
 ips -c     copy public IP to clipboard
 ips -p     public IP only (skip local)
-ips diag   run read-only network diagnostics
+ips diag   run read-only network diagnostics with quality classification
 ips link   show local network configuration
 ips peers  show passive neighbor-cache entries
-ips speed HOST  run an explicit iperf3 speed test
+ips speed HOST  run an explicit iperf3 test with loaded gateway latency
 """
 
 import argparse
@@ -30,9 +30,10 @@ import socket
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
-from metrics import human_number, human_rate, latency_metrics, percentile
+from metrics import human_number, human_rate, latency_metrics, percentile, quality_status
 from neighbors import peer_cache
 from net_platform import (
     default_iface,
@@ -42,6 +43,7 @@ from net_platform import (
     local_ips,
     resolver_servers,
     wifi_ssid,
+    wifi_telemetry,
 )
 
 _tty = sys.stdout.isatty()
@@ -85,6 +87,7 @@ class Check:
     detail: str
     latency_ms: int | None = None
     metrics: dict[str, object] | None = None
+    quality: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -96,6 +99,8 @@ class Check:
             result["latency_ms"] = self.latency_ms
         if self.metrics is not None:
             result["metrics"] = self.metrics
+        if self.quality is not None:
+            result["quality"] = self.quality
         return result
 
 
@@ -143,7 +148,8 @@ def ping_check(host: str | None, count: int, timeout: float) -> Check:
         else ("unknown" if result.returncode == 0 else "fail")
     )
     detail = f"{host}, {count} attempt(s){loss}"
-    return Check("gateway", status, detail, latency, latency_metrics(samples, count))
+    metrics = latency_metrics(samples, count)
+    return Check("gateway", status, detail, latency, metrics, quality_status(metrics))
 
 
 def dns_check(target: str, family: int) -> Check:
@@ -183,6 +189,7 @@ def diagnostics(args: argparse.Namespace) -> int:
     gateway = gateway_ip()
     addresses = local_ips(active)
     ssid = wifi_ssid(active)
+    wifi = wifi_telemetry(active)
     checks: list[Check] = []
     if args.command != "link":
         checks = [
@@ -191,6 +198,21 @@ def diagnostics(args: argparse.Namespace) -> int:
             https_check(DIAG_TARGET, DIAG_TIMEOUT, args),
         ]
 
+    reachability = (
+        "fail"
+        if any(check.status == "fail" for check in checks)
+        else (
+            "unknown"
+            if any(check.status in {"unknown", "unavailable", "timeout"} for check in checks)
+            else "pass"
+        )
+    )
+    quality_values = [check.quality for check in checks if check.quality]
+    quality = (
+        "degraded"
+        if "degraded" in quality_values
+        else ("unknown" if not quality_values or "unknown" in quality_values else "pass")
+    )
     data = {
         "host": socket.gethostname().removesuffix(".local"),
         "mode": args.command,
@@ -198,6 +220,7 @@ def diagnostics(args: argparse.Namespace) -> int:
         "interface": active,
         "link": label_for(active) if active else None,
         "ssid": ssid,
+        "wifi": wifi,
         "gateway": gateway,
         "resolvers": resolver_servers(),
         "addresses": [
@@ -210,6 +233,7 @@ def diagnostics(args: argparse.Namespace) -> int:
             for iface, label, addr, _is_default in addresses
         ],
         "checks": [check.as_dict() for check in checks],
+        "summary": {"reachability": reachability, "quality": quality},
     }
 
     if args.json:
@@ -222,6 +246,10 @@ def diagnostics(args: argparse.Namespace) -> int:
         print(f"  link           {data['link'] or '(unknown)'}")
         if ssid:
             print(f"  ssid           {ssid}")
+        if wifi:
+            print("  wifi telemetry")
+            for key, value in wifi.items():
+                print(f"    {key:<18} {value}")
         print(f"  gateway        {gateway or '(unknown)'}")
         print(f"  resolvers      {', '.join(data['resolvers']) or '(unknown)'}")
         if args.command == "link":
@@ -234,7 +262,10 @@ def diagnostics(args: argparse.Namespace) -> int:
             print("  checks")
             for check in checks:
                 timing = f" {check.latency_ms}ms" if check.latency_ms is not None else ""
-                print(f"    {check.status:<11} {check.name:<8} {check.detail}{timing}")
+                quality_label = f" quality={check.quality}" if check.quality else ""
+                print(
+                    f"    {check.status:<11} {check.name:<8} {check.detail}{timing}{quality_label}"
+                )
                 if check.metrics:
                     print(
                         f"      rtt_p50={human_number(check.metrics['rtt_p50_ms'], 'ms')} "
@@ -244,6 +275,8 @@ def diagnostics(args: argparse.Namespace) -> int:
                         f"rtt_var(sample)={human_number(check.metrics['rtt_sample_variance_ms2'], 'ms²')} "
                         f"rtt_ipdv_abs_mean={human_number(check.metrics['rtt_ipdv_abs_mean_ms'], 'ms')}"
                     )
+
+        print(f"  summary        reachability={reachability} quality={quality}")
 
     return 1 if any(check.status == "fail" for check in checks) else 0
 
@@ -334,14 +367,19 @@ def show_speed(args: argparse.Namespace) -> int:
     elif args.ipv6:
         command.append("-6")
 
+    gateway = gateway_ip()
+    baseline = ping_check(gateway, 5, 1.0) if gateway else None
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=SPEED_DURATION + 15,
-            check=False,
-        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            loaded_future = executor.submit(ping_check, gateway, 5, 1.0) if gateway else None
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=SPEED_DURATION + 15,
+                check=False,
+            )
+            loaded = loaded_future.result() if loaded_future else None
     except subprocess.TimeoutExpired:
         print("ips: iperf3 timed out", file=sys.stderr)
         return 1
@@ -358,6 +396,10 @@ def show_speed(args: argparse.Namespace) -> int:
         "mode": "tcp",
         "target": args.command_target,
         "duration_s": SPEED_DURATION,
+        "gateway_latency": {
+            "baseline": baseline.as_dict() if baseline else None,
+            "loaded": loaded.as_dict() if loaded else None,
+        },
         "report": report,
     }
     success = result.returncode == 0 and valid_report and "end" in report
@@ -384,6 +426,13 @@ def show_speed(args: argparse.Namespace) -> int:
                 fields.append(f"retransmits={section['retransmits']}")
             if fields:
                 print(f"  {label}: {' '.join(fields)}")
+        if baseline and loaded:
+            print(
+                "  gateway: "
+                f"baseline p95={human_number((baseline.metrics or {}).get('rtt_p95_ms'), 'ms')} "
+                f"loaded p95={human_number((loaded.metrics or {}).get('rtt_p95_ms'), 'ms')} "
+                f"quality={loaded.quality or 'unknown'}"
+            )
         if result.stderr.strip():
             print(result.stderr.strip(), file=sys.stderr)
     return result.returncode
@@ -401,7 +450,7 @@ commands:
   diag              gateway RTT, DNS, and HTTPS checks (read-only)
   link              interface, route, resolver, and address snapshot
   peers             native neighbor-cache view; no LAN probe
-  speed HOST        fixed 10-second TCP test to an iperf3 server
+  speed HOST        fixed 10-second TCP test plus gateway latency under load
 
 examples:
   ips

@@ -82,4 +82,59 @@ assert data["source"] == ["ip neigh show", "arp -an"]
 assert [peer["address"] for peer in data["peers"]] == ["192.168.1.1", "fe80::2"]
 assert data["peers"][0]["state"] == "REACHABLE"
 
+mac_wifi = """
+{
+  "SPAirPortDataType": [{
+    "spairport_airport_interfaces": [{
+      "_name": "en0",
+      "spairport_current_network_information": {
+        "spairport_network_channel": "157 (5GHz, 80MHz)",
+        "spairport_network_mcs": 7,
+        "spairport_network_phymode": "802.11ac",
+        "spairport_network_rate": 650,
+        "spairport_signal_noise": "-55 dBm / -95 dBm"
+      }
+    }]
+  }]
+}
+"""
+assert net_platform.parse_macos_wifi(mac_wifi, "en0") == {
+    "signal_dbm": -55,
+    "noise_dbm": -95,
+    "channel": 157,
+    "channel_width_mhz": 80,
+    "band": "5GHz",
+    "phy": "802.11ac",
+    "tx_rate_mbps": 650,
+    "mcs": 7,
+}
+
+linux_wifi = """
+Connected to aa:bb:cc:dd:ee:ff
+\tfreq: 5180
+\tsignal: -55.00 dBm
+\ttx bitrate: 650.0 MBit/s
+"""
+assert net_platform.parse_linux_wifi(linux_wifi) == {
+    "frequency_mhz": 5180,
+    "signal_dbm": -55,
+    "tx_rate_mbps": 650,
+}
+
+windows_wifi = """
+    State                   : connected
+    Signal                  : 80%
+    Channel                 : 157
+    Receive rate (Mbps)     : 600
+    Transmit rate (Mbps)    : 650
+    Radio type              : 802.11ax
+"""
+assert net_platform.parse_windows_wifi(windows_wifi) == {
+    "signal_percent": 80,
+    "channel": 157,
+    "rx_rate_mbps": 600,
+    "tx_rate_mbps": 650,
+    "phy": "802.11ax",
+}
+
 print("ips adapters: ok")

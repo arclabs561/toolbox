@@ -19,6 +19,9 @@ assert metrics["rtt_sample_variance_ms2"] == 4.0
 assert math.isclose(metrics["rtt_sample_stddev_ms"], 2.0)
 assert metrics["rtt_ipdv_abs_mean_ms"] == 2.0
 assert metrics["rtt_pdv_max_ms"] == 4.0
+assert ips["quality_status"](metrics) == "degraded"
+assert ips["quality_status"](ips["latency_metrics"]([10.0, 11.0, 12.0], sent=3)) == "pass"
+assert ips["quality_status"](ips["latency_metrics"]([], sent=3)) == "unknown"
 
 assert ips["human_rate"](1_000) == "1.00 Kbit/s"
 assert ips["human_rate"](1_000_000) == "1.00 Mbit/s"
