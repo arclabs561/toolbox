@@ -25,7 +25,6 @@ integration suite.
 | [commit-survey](commit-survey/) | Survey a repo's commit and branch conventions |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
 | [gh-dependabot](gh-dependabot/) | Inventory open Dependabot alerts across public repositories |
-| [pinglet](pinglet/) | Show local/public IPs and run network diagnostics (`pingl` shortcut) |
 | [perplexity-export](perplexity-export/) | Explore and export Perplexity chats |
 | [perplexity2md](perplexity2md/) | Convert Perplexity chat HTML to Markdown |
 | [reflow](reflow/) | Reflow Markdown text preserving code blocks |
@@ -38,53 +37,16 @@ Most tools are [PEP 723](https://peps.python.org/pep-0723/) scripts that run via
 `bin/recorder` is a compatibility link to the standalone
 [`parloq`](../parloq/) repo.
 
+The former `pinglet` network diagnostic now lives in the standalone Rust
+[`linktop`](../linktop/) project. Its own `just install` installs `linktop` plus
+the `pinglet` and `pingl` compatibility names into Cargo's bin directory.
+
 ## Tests
 
 ```sh
 just test                       # core + uv-backed tools
 TOOLBOX_BROWSER=1 tests/run.sh # also exercise webshot + check-math
 ```
-
-`just docker-base` builds the toolbox-owned Linux dependency image from the
-official Python slim image. It installs only the network tools and Python
-dependencies needed by `pinglet`, then runs as a non-root user. `just
-test-docker` uses that local base in a `--network none` container by default:
-
-```sh
-just docker-base
-just test-docker
-```
-
-The ECR publisher follows the same separation between routine
-observation and privileged mutation used by the infrastructure tooling. It
-requires an existing ECR repository, a separate short-lived profile, and the
-exact role name expected for that session. No repository is created or changed:
-
-```sh
-TOOLBOX_AWS_PROFILE=temporary-apply \
-TOOLBOX_ECR_ROLE=your-privileged-role \
-TOOLBOX_ECR_IMAGE=ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/arclabs-toolbox-pinglet-base \
-just docker-base-push-ecr
-```
-
-The target receives an immutable `YYYYMMDD-COMMIT` tag (with a dirty-tree
-suffix when applicable) and `latest`. AWS and Docker authentication are
-performed with a temporary mode-700 Docker config that is removed on exit.
-Provision the repository through a reviewed IaC path before using this target.
-Use `TOOLBOX_DOCKER_BASE` to smoke-test an ECR tag or another already available
-image.
-
-For a bounded local matrix, provide only images and platforms already available
-to the active context:
-
-```sh
-TOOLBOX_DOCKER_BASES='toolbox-pinglet-base:python3.12' \
-TOOLBOX_DOCKER_PLATFORMS='linux/arm64' \
-just test-docker-matrix
-```
-
-The matrix does not pull images implicitly. A platform that is not supported by
-the selected base image fails as a normal container-test failure.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs shellcheck, ruff
 (`ruff.toml`), and the test suite on Linux and macOS, plus a browser job for the

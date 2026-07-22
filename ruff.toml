@@ -8,7 +8,6 @@ extend-include = [
   "reflow/reflow",
   "webshot/webshot",
   "check-math/check-math",
-  "pinglet/pinglet",
   "toks/toks",
   "gemini2md/gemini2md",
   "claude2md/claude2md",
