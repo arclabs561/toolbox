@@ -55,21 +55,7 @@ just docker-base
 just test-docker
 ```
 
-To publish a multi-architecture base image to GitHub Container Registry,
-refresh GitHub CLI with package-write permission, then run:
-
-```sh
-gh auth refresh --hostname github.com --scopes write:packages
-just docker-base-push
-```
-
-The push target defaults to
-`ghcr.io/arclabs561/toolbox-pinglet-base:python3.12`. Override
-`TOOLBOX_BASE_IMAGE` or `TOOLBOX_DOCKER_PLATFORMS` when needed. Use
-`TOOLBOX_DOCKER_BASE` to smoke-test a registry tag or another already available
-image.
-
-The optional ECR publisher follows the same separation between routine
+The ECR publisher follows the same separation between routine
 observation and privileged mutation used by the infrastructure tooling. It
 requires an existing ECR repository, a separate short-lived profile, and the
 exact role name expected for that session. No repository is created or changed:
@@ -85,6 +71,8 @@ The target receives an immutable `YYYYMMDD-COMMIT` tag (with a dirty-tree
 suffix when applicable) and `latest`. AWS and Docker authentication are
 performed with a temporary mode-700 Docker config that is removed on exit.
 Provision the repository through a reviewed IaC path before using this target.
+Use `TOOLBOX_DOCKER_BASE` to smoke-test an ECR tag or another already available
+image.
 
 For a bounded local matrix, provide only images and platforms already available
 to the active context:

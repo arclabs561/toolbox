@@ -24,26 +24,6 @@ test:
 docker-base:
     docker build -f docker/pinglet-base/Dockerfile -t "${TOOLBOX_BASE_IMAGE:-{{base_image}}}" .
 
-# Build and publish a multi-architecture toolbox base image to GitHub Container
-# Registry. GitHub CLI must have the `write:packages` scope.
-docker-base-push:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    image="${TOOLBOX_BASE_IMAGE:-ghcr.io/arclabs561/toolbox-pinglet-base:python3.12}"
-    username="$(gh api user --jq .login)"
-    umask 077
-    docker_config="$(mktemp -d "${TMPDIR:-/tmp}/toolbox-ghcr.XXXXXX")"
-    chmod 700 "$docker_config"
-    cleanup_docker_config() { rm -rf -- "$docker_config"; }
-    trap cleanup_docker_config EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    export DOCKER_CONFIG="$docker_config"
-    gh auth token | docker login ghcr.io --username "$username" --password-stdin >/dev/null
-    docker buildx build --platform "${TOOLBOX_DOCKER_PLATFORMS:-linux/amd64,linux/arm64}" \
-        -f docker/pinglet-base/Dockerfile -t "$image" --push .
-
 # Publish to an existing, infra-managed ECR repository. This deliberately
 # requires a separate temporary privileged session and exact role check. The
 # publisher never creates or changes an ECR repository.

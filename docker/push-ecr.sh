@@ -60,6 +60,7 @@ fi
 umask 077
 docker_config="$(mktemp -d "${TMPDIR:-/tmp}/toolbox-ecr.XXXXXX")"
 chmod 700 "$docker_config"
+printf '{"auths":{}}\n' >"$docker_config/config.json"
 cleanup_docker_config() {
     rm -rf -- "$docker_config"
 }
