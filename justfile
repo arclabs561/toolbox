@@ -29,7 +29,10 @@ test-docker:
         echo 'set TOOLBOX_DOCKER_BASE to a cached image or make the image available through Colima' >&2; \
         exit 2; \
     fi
-    docker build --build-arg "BASE_IMAGE=${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" -f tests/docker/Dockerfile -t toolbox-ips-smoke .
+    docker build \
+        --build-arg "BASE_IMAGE=${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" \
+        --build-arg "INSTALL_DEPS=${TOOLBOX_DOCKER_INSTALL_DEPS:-1}" \
+        -f tests/docker/Dockerfile -t toolbox-ips-smoke .
     docker run --rm --network none toolbox-ips-smoke
 
 # Validate the source suite; toolbox tools are PEP 723 scripts and need no compile step.

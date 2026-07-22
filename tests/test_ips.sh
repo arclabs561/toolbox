@@ -27,4 +27,9 @@ logic=$(
 )
 assert_contains "offline metric checks pass" "$logic" "ips logic: ok"
 
+adapters=$(
+  uv run --with httpx --with psutil python "$ROOT/tests/test_ips_adapters.py" "$ROOT/ips" 2>&1
+)
+assert_contains "offline adapter checks pass" "$adapters" "ips adapters: ok"
+
 finish
