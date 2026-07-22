@@ -20,13 +20,13 @@ test:
 
 # Exercise the read-only Linux adapter inside an isolated container namespace.
 # Uses the active Docker context (Colima on this machine). The base image must
-# already be cached, or be available through that context's configured registry.
+# already be cached in that context; this target never performs an implicit pull.
 test-docker:
     @printf 'docker context: '
     @docker context show
     if ! docker image inspect "${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" >/dev/null 2>&1; then \
-        echo "missing local base image: ${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" >&2; \
-        echo 'set TOOLBOX_DOCKER_BASE to a cached image or make the image available through Colima' >&2; \
+        echo "missing cached base image: ${TOOLBOX_DOCKER_BASE:-python:3.12-slim}" >&2; \
+        echo 'set TOOLBOX_DOCKER_BASE to an image already present in this Docker context' >&2; \
         exit 2; \
     fi
     docker build \

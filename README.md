@@ -41,8 +41,20 @@ Most tools are [PEP 723](https://peps.python.org/pep-0723/) scripts that run via
 ## Tests
 
 ```sh
-tests/run.sh                   # core + uv-backed tools
+just test                       # core + uv-backed tools
 TOOLBOX_BROWSER=1 tests/run.sh # also exercise webshot + check-math
+```
+
+`just test-docker` runs the Linux adapter in a `--network none` container using
+the active Docker context. It expects a compatible base image to be cached in
+that context and does not pull implicitly. With Colima, use a cached image that
+already contains the PEP 723 dependencies when the VM cannot reach package
+registries:
+
+```sh
+TOOLBOX_DOCKER_BASE=<cached-image> \
+TOOLBOX_DOCKER_INSTALL_DEPS=0 \
+just test-docker
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs shellcheck, ruff
