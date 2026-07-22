@@ -25,7 +25,7 @@ integration suite.
 | [commit-survey](commit-survey/) | Survey a repo's commit and branch conventions |
 | [gemini2md](gemini2md/) | Convert Gemini HTML exports to Markdown |
 | [gh-dependabot](gh-dependabot/) | Inventory open Dependabot alerts across public repositories |
-| [ips](ips/) | Show local/public IPs and run network diagnostics |
+| [pinglet](pinglet/) | Show local/public IPs and run network diagnostics (`pingl` shortcut) |
 | [perplexity-export](perplexity-export/) | Explore and export Perplexity chats |
 | [perplexity2md](perplexity2md/) | Convert Perplexity chat HTML to Markdown |
 | [reflow](reflow/) | Reflow Markdown text preserving code blocks |
@@ -45,32 +45,41 @@ just test                       # core + uv-backed tools
 TOOLBOX_BROWSER=1 tests/run.sh # also exercise webshot + check-math
 ```
 
-`just test-docker` runs the Linux adapter in a `--network none` container using
-the active Docker context. It expects a compatible base image to be cached in
-that context and does not pull implicitly. With Colima, use a cached image that
-already contains the PEP 723 dependencies when the VM cannot reach package
-registries:
+`just docker-base` builds the toolbox-owned Linux dependency image from the
+official Python slim image. It installs only the network tools and Python
+dependencies needed by `pinglet`, then runs as a non-root user. `just
+test-docker` uses that local base in a `--network none` container by default:
 
 ```sh
-TOOLBOX_DOCKER_BASE=<cached-image> \
-TOOLBOX_DOCKER_INSTALL_DEPS=0 \
+just docker-base
 just test-docker
 ```
+
+To publish a multi-architecture base image to the configured private AWS ECR
+account, authenticate with AWS SSO first, then run:
+
+```sh
+aws sso login
+just docker-base-push
+```
+
+The push target defaults to `toolbox/pinglet-base:python3.12`, derives the ECR
+registry from the current AWS caller and region, and creates that repository if
+needed. Override `TOOLBOX_ECR_REPOSITORY`, `TOOLBOX_BASE_TAG`, or
+`TOOLBOX_DOCKER_PLATFORMS` when needed. Use `TOOLBOX_DOCKER_BASE` to smoke-test
+an ECR tag or another already available image.
 
 For a bounded local matrix, provide only images and platforms already available
 to the active context:
 
 ```sh
-TOOLBOX_DOCKER_BASES='image-a image-b' \
-TOOLBOX_DOCKER_PLATFORMS='linux/arm64 linux/amd64' \
-TOOLBOX_DOCKER_INSTALL_DEPS=0 \
+TOOLBOX_DOCKER_BASES='toolbox-pinglet-base:python3.12' \
+TOOLBOX_DOCKER_PLATFORMS='linux/arm64' \
 just test-docker-matrix
 ```
 
-The matrix does not pull images implicitly. Set `TOOLBOX_DOCKER_INSTALL_DEPS=0`
-when the cached bases already contain `httpx` and `psutil` or run as a
-non-root user. A platform that is not supported by the selected base image
-fails as a normal container-test failure.
+The matrix does not pull images implicitly. A platform that is not supported by
+the selected base image fails as a normal container-test failure.
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs shellcheck, ruff
 (`ruff.toml`), and the test suite on Linux and macOS, plus a browser job for the

@@ -1,9 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
-python ips/ips link --json > /tmp/link.json
+python pinglet/pinglet link --json > /tmp/link.json
 set +e
-python ips/ips peers --json > /tmp/peers.json
+python pinglet/pinglet peers --json > /tmp/peers.json
 peers_code=$?
 set -e
 [ "$peers_code" -eq 0 ] || [ "$peers_code" -eq 2 ]
