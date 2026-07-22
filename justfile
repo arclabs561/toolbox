@@ -24,19 +24,12 @@ test:
 docker-base:
     docker build -f docker/pinglet-base/Dockerfile -t "${TOOLBOX_BASE_IMAGE:-{{base_image}}}" .
 
-# Build and publish a multi-architecture toolbox base image to private ECR.
-# AWS SSO or another configured AWS identity must already be authenticated.
+# Build and publish a multi-architecture toolbox base image to GitHub Container
+# Registry. GitHub CLI must have the `write:packages` scope.
 docker-base-push:
-    region="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region)}}"; \
-    : "${region:?set AWS_REGION or AWS_DEFAULT_REGION}"; \
-    account="$(aws sts get-caller-identity --query Account --output text)"; \
-    registry="${TOOLBOX_ECR_REGISTRY:-$account.dkr.ecr.$region.amazonaws.com}"; \
-    repository="${TOOLBOX_ECR_REPOSITORY:-toolbox/pinglet-base}"; \
-    tag="${TOOLBOX_BASE_TAG:-python3.12}"; \
-    image="$registry/$repository:$tag"; \
-    aws ecr describe-repositories --repository-names "$repository" --region "$region" >/dev/null 2>&1 || \
-        aws ecr create-repository --repository-name "$repository" --region "$region" >/dev/null; \
-    aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry"; \
+    image="${TOOLBOX_BASE_IMAGE:-ghcr.io/arclabs561/toolbox-pinglet-base:python3.12}"; \
+    username="$(gh api user --jq .login)"; \
+    gh auth token | docker login ghcr.io --username "$username" --password-stdin; \
     docker buildx build --platform "${TOOLBOX_DOCKER_PLATFORMS:-linux/amd64,linux/arm64}" \
         -f docker/pinglet-base/Dockerfile -t "$image" --push .
 

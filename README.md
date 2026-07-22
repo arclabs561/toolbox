@@ -55,19 +55,19 @@ just docker-base
 just test-docker
 ```
 
-To publish a multi-architecture base image to the configured private AWS ECR
-account, authenticate with AWS SSO first, then run:
+To publish a multi-architecture base image to GitHub Container Registry,
+refresh GitHub CLI with package-write permission, then run:
 
 ```sh
-aws sso login
+gh auth refresh --hostname github.com --scopes write:packages
 just docker-base-push
 ```
 
-The push target defaults to `toolbox/pinglet-base:python3.12`, derives the ECR
-registry from the current AWS caller and region, and creates that repository if
-needed. Override `TOOLBOX_ECR_REPOSITORY`, `TOOLBOX_BASE_TAG`, or
-`TOOLBOX_DOCKER_PLATFORMS` when needed. Use `TOOLBOX_DOCKER_BASE` to smoke-test
-an ECR tag or another already available image.
+The push target defaults to
+`ghcr.io/arclabs561/toolbox-pinglet-base:python3.12`. Override
+`TOOLBOX_BASE_IMAGE` or `TOOLBOX_DOCKER_PLATFORMS` when needed. Use
+`TOOLBOX_DOCKER_BASE` to smoke-test a registry tag or another already available
+image.
 
 For a bounded local matrix, provide only images and platforms already available
 to the active context:
